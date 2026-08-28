@@ -1,0 +1,25 @@
+# Gradle
+.gradle/
+build/
+!gradle/wrapper/gradle-wrapper.jar
+
+# IDE
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+out/
+
+# Node (프론트엔드는 Docker 안에서 빌드하지만 로컬 작업 시 생긴다)
+node_modules/
+frontend/dist/
+
+# OS
+.DS_Store
+
+# Env
+.env
+
+# Logs
+*.log
