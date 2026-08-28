@@ -1,0 +1,73 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: alimi-api
+  namespace: alimi
+spec:
+  # ClusterIP 다. 외부 입구는 alimi-frontend(nginx)이고, nginx 가 /api/ 를 여기로 프록시한다.
+  # API 를 직접 노출하지 않으므로 CORS 설정이 필요 없다.
+  type: ClusterIP
+  selector:
+    app: alimi
+    role: api
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: alimi-api
+  namespace: alimi
+  labels: { app: alimi, role: api }
+spec:
+  # 무상태 HTTP 라 몇 개든 띄울 수 있다. 세 역할 중 유일하게 자유롭게 늘어나는 역할.
+  replicas: 2
+  selector:
+    matchLabels: { app: alimi, role: api }
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels: { app: alimi, role: api }
+    spec:
+      terminationGracePeriodSeconds: 40
+      containers:
+        - name: app
+          image: alimi-api:local
+          imagePullPolicy: IfNotPresent   # kind load 로 넣은 로컬 이미지를 쓴다
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: SPRING_PROFILES_ACTIVE
+              value: "k8s"
+            - name: SPRING_DATASOURCE_USERNAME
+              valueFrom: { secretKeyRef: { name: alimi-secret, key: MYSQL_USER } }
+            - name: SPRING_DATASOURCE_PASSWORD
+              valueFrom: { secretKeyRef: { name: alimi-secret, key: MYSQL_PASSWORD } }
+          envFrom:
+            - configMapRef: { name: alimi-config }
+          # JVM 기동이 느리므로 startupProbe 로 감싼다. 이게 없으면
+          # livenessProbe 가 기동 중인 앱을 계속 죽여 CrashLoop 처럼 보인다.
+          startupProbe:
+            httpGet: { path: /actuator/health/readiness, port: http }
+            periodSeconds: 5
+            failureThreshold: 30      # 최대 150초 허용
+          readinessProbe:
+            httpGet: { path: /actuator/health/readiness, port: http }
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /actuator/health/liveness, port: http }
+            periodSeconds: 15
+          resources:
+            requests:
+              memory: 384Mi
+              cpu: 100m
+            limits:
+              memory: 768Mi

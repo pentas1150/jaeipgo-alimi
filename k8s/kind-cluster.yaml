@@ -1,0 +1,14 @@
+# kind create cluster --config k8s/kind-cluster.yaml
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: alimi
+
+nodes:
+  - role: control-plane
+    # 노드 1개짜리 클러스터. 학습 목적에선 멀티 노드가 주는 게 거의 없고
+    # 로컬 메모리만 잡아먹는다. (Docker 에 할당된 메모리가 8GB 뿐)
+    extraPortMappings:
+      # API Service(NodePort 30080) 를 호스트 8080 으로 노출
+      - containerPort: 30080
+        hostPort: 8080
+        protocol: TCP

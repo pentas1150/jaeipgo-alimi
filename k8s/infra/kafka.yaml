@@ -1,0 +1,113 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: kafka
+  namespace: alimi
+spec:
+  clusterIP: None
+  selector:
+    app: kafka
+  ports:
+    - name: plaintext
+      port: 9092
+      targetPort: 9092
+    - name: controller
+      port: 9093
+      targetPort: 9093
+
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: kafka
+  namespace: alimi
+spec:
+  serviceName: kafka
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kafka
+  template:
+    metadata:
+      labels:
+        app: kafka
+    spec:
+      priorityClassName: alimi-critical
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: kafka
+          image: confluentinc/cp-kafka:7.8.0
+          ports:
+            - name: plaintext
+              containerPort: 9092
+            - name: controller
+              containerPort: 9093
+          env:
+            # KRaft 단일 노드. 학습용이므로 ZooKeeper 도, 다중 브로커도 쓰지 않는다.
+            - name: KAFKA_NODE_ID
+              value: "1"
+            - name: KAFKA_PROCESS_ROLES
+              value: "broker,controller"
+            - name: KAFKA_LISTENERS
+              value: "PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093"
+            # ⚠️ 반드시 FQDN. 클라이언트는 부트스트랩 응답에 담긴 이 주소로 재접속한다.
+            # 짧은 이름을 쓰면 다른 네임스페이스(keda)에서 이름이 안 풀려
+            # "부트스트랩은 되는데 실제 통신이 안 되는" 형태로 조용히 실패한다.
+            - name: KAFKA_ADVERTISED_LISTENERS
+              value: "PLAINTEXT://kafka-0.kafka.alimi.svc.cluster.local:9092"
+            - name: KAFKA_LISTENER_SECURITY_PROTOCOL_MAP
+              value: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT"
+            - name: KAFKA_CONTROLLER_LISTENER_NAMES
+              value: "CONTROLLER"
+            - name: KAFKA_INTER_BROKER_LISTENER_NAME
+              value: "PLAINTEXT"
+            - name: KAFKA_CONTROLLER_QUORUM_VOTERS
+              value: "1@kafka-0.kafka.alimi.svc.cluster.local:9093"
+            - name: KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR
+              value: "1"
+            - name: KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR
+              value: "1"
+            - name: KAFKA_TRANSACTION_STATE_LOG_MIN_ISR
+              value: "1"
+            - name: KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS
+              value: "0"
+            - name: KAFKA_AUTO_CREATE_TOPICS_ENABLE
+              value: "true"
+            - name: KAFKA_LOG_DIRS
+              value: "/var/lib/kafka/data"
+            - name: CLUSTER_ID
+              value: "5L6g3nShT-eMCtK--X86sw"
+            - name: KAFKA_HEAP_OPTS
+              value: "-Xms256M -Xmx768M"
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/kafka
+          readinessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - "kafka-broker-api-versions --bootstrap-server localhost:9092 >/dev/null 2>&1"
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 20
+          livenessProbe:
+            tcpSocket:
+              port: 9092
+            initialDelaySeconds: 90
+            periodSeconds: 15
+            failureThreshold: 5
+          resources:
+            requests:
+              memory: 768Mi
+              cpu: 300m
+            limits:
+              memory: 1536Mi
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 2Gi

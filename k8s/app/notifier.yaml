@@ -1,0 +1,56 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: alimi-notifier
+  namespace: alimi
+  labels: { app: alimi, role: notifier }
+spec:
+  # checker 와 같은 이유로 replicas 생략 (KEDA 가 관리)
+  selector:
+    matchLabels: { app: alimi, role: notifier }
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels: { app: alimi, role: notifier }
+    spec:
+      priorityClassName: alimi-worker
+      # 외부 채널(SMTP/웹훅) 응답 대기가 있으므로 넉넉히.
+      terminationGracePeriodSeconds: 90
+      containers:
+        - name: app
+          image: alimi-notifier:local          # 브라우저 불필요 → 슬림 이미지
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: SPRING_PROFILES_ACTIVE
+              value: "k8s"
+            - name: SPRING_KAFKA_CONSUMER_GROUP_ID
+              value: "alimi-notifier"
+            - name: SPRING_DATASOURCE_USERNAME
+              valueFrom: { secretKeyRef: { name: alimi-secret, key: MYSQL_USER } }
+            - name: SPRING_DATASOURCE_PASSWORD
+              valueFrom: { secretKeyRef: { name: alimi-secret, key: MYSQL_PASSWORD } }
+          envFrom:
+            - configMapRef: { name: alimi-config }
+          startupProbe:
+            httpGet: { path: /actuator/health/readiness, port: http }
+            periodSeconds: 5
+            failureThreshold: 30
+          readinessProbe:
+            httpGet: { path: /actuator/health/readiness, port: http }
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /actuator/health/liveness, port: http }
+            periodSeconds: 15
+          resources:
+            requests:
+              memory: 384Mi
+              cpu: 100m
+            limits:
+              memory: 768Mi

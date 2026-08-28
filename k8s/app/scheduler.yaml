@@ -1,0 +1,58 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: alimi-scheduler
+  namespace: alimi
+  labels: { app: alimi, role: scheduler }
+spec:
+  # ⚠️ 반드시 1. 스케줄러가 2개면 같은 배치 잡이 동시에 돌아
+  # 같은 상품에 대해 체크 요청이 중복 발행된다.
+  #
+  # 그런데 replicas:1 만으로는 부족하다 — RollingUpdate 중에는 새 파드와 옛 파드가
+  # 잠시 공존한다. 그래서 Recreate 를 쓴다. (짧은 다운타임은 스케줄러에겐 문제없다)
+  #
+  # 제대로 하려면 ShedLock 이나 리더 선출을 붙이는 게 맞다. 지금은 배포 전략으로 막는다.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels: { app: alimi, role: scheduler }
+  template:
+    metadata:
+      labels: { app: alimi, role: scheduler }
+    spec:
+      # 밀려나면 시스템 전체가 멈추는 단일 인스턴스다. 최우선.
+      priorityClassName: alimi-critical
+      terminationGracePeriodSeconds: 40
+      containers:
+        - name: app
+          image: alimi-scheduler:local
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: SPRING_PROFILES_ACTIVE
+              value: "k8s"
+            - name: SPRING_DATASOURCE_USERNAME
+              valueFrom: { secretKeyRef: { name: alimi-secret, key: MYSQL_USER } }
+            - name: SPRING_DATASOURCE_PASSWORD
+              valueFrom: { secretKeyRef: { name: alimi-secret, key: MYSQL_PASSWORD } }
+          envFrom:
+            - configMapRef: { name: alimi-config }
+          startupProbe:
+            httpGet: { path: /actuator/health/readiness, port: http }
+            periodSeconds: 5
+            failureThreshold: 30
+          readinessProbe:
+            httpGet: { path: /actuator/health/readiness, port: http }
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /actuator/health/liveness, port: http }
+            periodSeconds: 15
+          resources:
+            requests:
+              memory: 384Mi
+              cpu: 100m
+            limits:
+              memory: 768Mi

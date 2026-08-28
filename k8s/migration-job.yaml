@@ -1,0 +1,48 @@
+# DB 마이그레이션은 앱이 아니라 이 Job 이 소유한다.
+#
+# 앱에서 Flyway 를 끈 이유 (application-k8s.yml):
+#   배포 단위가 4개이고 api 는 replicas=2 라, 켜두면 여러 파드가 동시에 마이그레이션을
+#   시도한다. Flyway 락 덕분에 안전하긴 하지만 롤링 배포 중에
+#   **구버전 파드가 살아있는 상태로 스키마가 바뀔 수 있다.**
+#
+# 실행 순서는 강제하지 않는다. 스키마가 없으면 JPA ddl-auto=validate 가 앱 기동을
+# 실패시키므로, 앱은 이 Job 이 끝날 때까지 CrashLoop 하다가 자동으로 회복된다.
+# (Kafka 의존성을 다루는 방식과 같은 패턴이다 — k8s 에서 의존성 대기는
+#  initContainer 로 폴링하기보다 크래시 + 재시작에 맡기는 쪽이 단순하다)
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: alimi-migration
+  namespace: alimi
+spec:
+  backoffLimit: 10          # MySQL 이 아직 안 떴을 수 있으므로 넉넉히 재시도
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels: { app: alimi, role: migration }
+    spec:
+      restartPolicy: OnFailure
+      priorityClassName: alimi-critical   # 이게 끝나야 앱이 산다
+      containers:
+        - name: flyway
+          image: alimi-migration:local
+          imagePullPolicy: IfNotPresent
+          args:
+            - -connectRetries=30          # MySQL 기동 대기
+            - -baselineOnMigrate=true
+            - migrate
+          env:
+            - name: FLYWAY_URL
+              # ⚠️ 앱과 달리 Flyway CLI 는 SPRING_DATASOURCE_URL 을 모른다.
+              # ConfigMap 값을 그대로 못 쓰고 여기서 따로 지정한다.
+              value: jdbc:mysql://mysql.alimi.svc.cluster.local:3306/alimi?useUnicode=true&characterEncoding=UTF-8&serverTimezone=UTC
+            - name: FLYWAY_USER
+              valueFrom: { secretKeyRef: { name: alimi-secret, key: MYSQL_USER } }
+            - name: FLYWAY_PASSWORD
+              valueFrom: { secretKeyRef: { name: alimi-secret, key: MYSQL_PASSWORD } }
+          resources:
+            requests:
+              memory: 192Mi
+              cpu: 100m
+            limits:
+              memory: 512Mi

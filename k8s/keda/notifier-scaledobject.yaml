@@ -1,0 +1,42 @@
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: alimi-notifier
+  namespace: alimi
+spec:
+  scaleTargetRef:
+    name: alimi-notifier
+
+  # pollingInterval / cooldownPeriod 생략 — minReplicaCount=0 일 때만 유효하다.
+  # (checker-scaledobject.yaml 참고)
+
+  minReplicaCount: 1
+  maxReplicaCount: 6      # notification.dispatch.v1 파티션 수와 동일
+
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleDown:
+          stabilizationWindowSeconds: 180
+        scaleUp:
+          stabilizationWindowSeconds: 0
+
+  triggers:
+    # 팬아웃 트리거: 재입고 1건이 구독자 N건으로 불어나는 지점
+    - type: kafka
+      metadata:
+        bootstrapServers: kafka-0.kafka.alimi.svc.cluster.local:9092
+        consumerGroup: alimi-notifier
+        topic: stock.restocked.v1
+        lagThreshold: "10"
+        offsetResetPolicy: earliest
+
+    # 실제 발송 트리거. 발송은 건당 가벼우므로 임계를 높게 잡는다.
+    # 트리거가 여러 개면 KEDA 는 각 트리거가 요구하는 replica 중 최댓값을 택한다.
+    - type: kafka
+      metadata:
+        bootstrapServers: kafka-0.kafka.alimi.svc.cluster.local:9092
+        consumerGroup: alimi-notifier
+        topic: notification.dispatch.v1
+        lagThreshold: "50"
+        offsetResetPolicy: earliest

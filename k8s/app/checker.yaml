@@ -1,0 +1,77 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: alimi-checker
+  namespace: alimi
+  labels: { app: alimi, role: checker }
+spec:
+  # replicas 를 일부러 쓰지 않았다.
+  # KEDA(HPA)가 이 필드를 관리하므로, 여기에 값을 박아두면 `kubectl apply` 할 때마다
+  # 스케일이 1로 되돌아갔다가 KEDA 가 다시 올리는 진동이 생긴다.
+  selector:
+    matchLabels: { app: alimi, role: checker }
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels: { app: alimi, role: checker }
+    spec:
+      # 오토스케일로 무한정 늘어나는 쪽이므로, 자원이 부족하면 이쪽이 먼저 밀려나야 한다.
+      priorityClassName: alimi-worker
+      # ⚠️ Playwright 타임아웃(30s) + graceful shutdown(60s) 보다 커야 한다.
+      # 이 값이 작으면 체크 도중에 SIGKILL 이 날아가고, 메시지는 커밋되지 않아
+      # 다음 파드가 처음부터 다시 처리한다(= 브라우저 작업 낭비).
+      terminationGracePeriodSeconds: 120
+      containers:
+        - name: app
+          # 브라우저가 들어있는 별도 이미지. 나머지 역할과 태그가 다르다.
+          image: alimi-checker:local
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: SPRING_PROFILES_ACTIVE
+              value: "k8s"
+            # 역할마다 컨슈머 그룹을 분리한다.
+            # 그룹을 공유하면 KEDA 가 보는 랙이 뒤섞여 엉뚱한 스케일 판단을 한다.
+            - name: SPRING_KAFKA_CONSUMER_GROUP_ID
+              value: "alimi-checker"
+            - name: SPRING_DATASOURCE_USERNAME
+              valueFrom: { secretKeyRef: { name: alimi-secret, key: MYSQL_USER } }
+            - name: SPRING_DATASOURCE_PASSWORD
+              valueFrom: { secretKeyRef: { name: alimi-secret, key: MYSQL_PASSWORD } }
+          envFrom:
+            - configMapRef: { name: alimi-config }
+          volumeMounts:
+            # ⚠️ 이게 없으면 Chromium 이 랜덤하게 죽는다.
+            # 컨테이너 기본 /dev/shm 은 64MB 인데 Chromium 은 공유 메모리를 훨씬 많이 쓴다.
+            # 증상이 "가끔 탭이 크래시"라 원인 찾기가 아주 어렵다.
+            - name: dshm
+              mountPath: /dev/shm
+          startupProbe:
+            httpGet: { path: /actuator/health/readiness, port: http }
+            periodSeconds: 5
+            failureThreshold: 30
+          readinessProbe:
+            httpGet: { path: /actuator/health/readiness, port: http }
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /actuator/health/liveness, port: http }
+            periodSeconds: 15
+          # 브라우저가 메모리를 많이 쓴다. limit 을 낮게 잡으면 조용히 OOMKill 된다.
+          # (kubectl describe pod 의 Last State: OOMKilled 로만 보인다)
+          resources:
+            requests:
+              memory: 768Mi
+              cpu: 250m
+            limits:
+              memory: 1536Mi
+      volumes:
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Gi
