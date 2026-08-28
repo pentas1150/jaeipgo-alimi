@@ -9,6 +9,18 @@
 brew install kind helm     # kubectl 은 이미 설치돼 있음
 ```
 
+**Secret 준비** — 리포지토리에 없으므로 직접 만들어야 한다:
+
+```bash
+cp k8s/secret.env.example k8s/secret.env
+# 필요하면 값을 수정한다. 이 파일은 .gitignore 되어 있다.
+```
+
+`kustomization.yaml` 의 `secretGenerator` 가 이 파일에서 Secret 을 만든다.
+생성되는 이름에는 내용 해시가 붙고(`alimi-secret-bgtmbhbbh4`), kustomize 가
+`secretKeyRef` / `envFrom.secretRef` 참조를 전부 그 이름으로 바꿔준다.
+값을 바꾸면 이름이 달라져 파드가 자동으로 롤링 재시작된다.
+
 Docker Desktop 메모리를 **최소 8GB**로 올려둘 것 (Settings → Resources).
 이 클러스터는 idle 상태에서 약 4GB, checker 를 3대로 늘리면 약 6GB를 쓴다.
 
@@ -196,6 +208,7 @@ kind delete cluster --name alimi
 
 | 증상 | 원인 | 해결 |
 |------|------|------|
+| `secret.env: no such file` | Secret 파일을 안 만듦 | `cp k8s/secret.env.example k8s/secret.env` |
 | `ErrImagePull` / `ImagePullBackOff` | kind 노드에 이미지가 없음 | 2번의 `kind load` 재실행 |
 | checker 파드가 `OOMKilled` | 브라우저가 메모리 한도 초과 | `checker.yaml` 의 `limits.memory` 상향 |
 | Chromium 이 랜덤 크래시 | `/dev/shm` 부족 | `dshm` 볼륨이 마운트됐는지 확인 |
@@ -212,7 +225,7 @@ kind delete cluster --name alimi
 
 - **Ingress** — 지금은 NodePort. 실전은 ingress-nginx + Ingress 리소스
 - **Strimzi** — 지금 Kafka 는 단일 노드 StatefulSet. 운영급은 Strimzi 오퍼레이터로 (`KafkaTopic` CR 로 토픽도 선언적 관리)
-- **Secret 관리** — `config.yaml` 의 Secret 이 평문으로 git 에 있다. Sealed Secrets / External Secrets 로 이전
+- **Secret 관리** — 지금은 로컬 `secret.env`(git 제외) 기반이다. 여러 사람이 쓰거나 실제 자격증명이 생기면 Sealed Secrets / External Secrets Operator / SOPS 로 이전
 - **kustomize overlay** — 지금은 base 뿐. `overlays/local`, `overlays/prod` 로 분리
 - **PodDisruptionBudget** — 노드 드레인 시 checker 가 한꺼번에 죽지 않도록
 - **ShedLock** — scheduler 단일 실행을 `Recreate` 전략이 아니라 애플리케이션 레벨에서 보장

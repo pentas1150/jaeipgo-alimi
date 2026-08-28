@@ -13,17 +13,6 @@ data:
   SPRING_DATASOURCE_URL: "jdbc:mysql://mysql.alimi.svc.cluster.local:3306/alimi?useUnicode=true&characterEncoding=UTF-8&serverTimezone=UTC&rewriteBatchedStatements=true"
   TZ: "UTC"
 
----
-apiVersion: v1
-kind: Secret
-metadata:
-  name: alimi-secret
-  namespace: alimi
-type: Opaque
-stringData:
-  # 로컬 학습용 값이다. 실제 배포에서는 이 파일을 git 에 두지 않는다.
-  # → Sealed Secrets / External Secrets Operator / SOPS 중 하나로 옮길 것.
-  MYSQL_ROOT_PASSWORD: "root"
-  MYSQL_DATABASE: "alimi"
-  MYSQL_USER: "alimi"
-  MYSQL_PASSWORD: "alimi"
+# Secret 은 여기 없다.
+# kustomization.yaml 의 secretGenerator 가 `secret.env`(git 제외)에서 생성한다.
+# 설정 방법은 k8s/README.md "0. 선행 조건" 참고.

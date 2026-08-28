@@ -819,7 +819,7 @@ CrashLoopBackOff에 빠졌다. Kafka가 Ready된 뒤 자동 회복됐다(재시�
 ### 12.7 아직 안 한 것
 
 Ingress(현재 NodePort) / Strimzi 오퍼레이터(현재 단일 노드 StatefulSet) /
-Secret 외부화(현재 평문) / kustomize overlay / PodDisruptionBudget / Prometheus·Grafana.
+Secret 완전 외부화(현재는 로컬 `secret.env` 기반, git 제외) / kustomize overlay / PodDisruptionBudget / Prometheus·Grafana.
 상세는 `k8s/README.md` 하단.
 
 ### 12.8 컨슈머 readiness의 한계 `[미결정]`

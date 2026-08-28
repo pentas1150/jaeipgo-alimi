@@ -56,6 +56,9 @@ JPA `ddl-auto=validate` 이므로 엔티티와 스키마가 어긋나면 기동�
 
 로컬 k8s (kind + KEDA + 마이그레이션 Job). 절차는 [k8s/README.md](k8s/README.md), 배경은 §12.
 
+**Secret 은 리포지토리에 없다.** `k8s/secret.env`(git 제외)를 만들어야 배포된다 —
+`cp k8s/secret.env.example k8s/secret.env`. 자격증명을 매니페스트에 직접 쓰지 않는다.
+
 **Kafka 컨슈머 파드는 파티션 수를 넘겨 늘려봐야 논다.** `maxReplicaCount ≤ 파티션 수`를 지킨다.
 
 ## 현재 상태
