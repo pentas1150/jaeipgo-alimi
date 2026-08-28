@@ -1,0 +1,127 @@
+# 모든 app-* 이 공유하는 설정.
+#
+# core 가 이 파일을 갖는 이유: 클래스패스에 application.yml 이 여러 개면 하나만 이기므로,
+# app-* 모듈에는 두지 않고 여기 한 곳에서만 관리한다.
+# 역할별로 달라지는 값(컨슈머 그룹 등)은 환경변수로 주입한다.
+#
+# ⚠️ 프로파일은 이제 **환경**만 의미한다 (local / docker / k8s).
+# 역할(api/scheduler/checker/notifier)은 프로파일이 아니라 **모듈**로 나뉜다.
+spring:
+  application:
+    name: ${SPRING_APPLICATION_NAME:alimi}
+
+  profiles:
+    active: ${SPRING_PROFILES_ACTIVE:local}
+
+  # 처리 중인 메시지를 끝내고 죽을 시간.
+  # k8s 의 terminationGracePeriodSeconds 보다 반드시 작아야 한다.
+  lifecycle:
+    timeout-per-shutdown-phase: 60s
+
+  datasource:
+    url: ${SPRING_DATASOURCE_URL:jdbc:mysql://localhost:3306/alimi?useUnicode=true&characterEncoding=UTF-8&serverTimezone=UTC&rewriteBatchedStatements=true}
+    username: ${SPRING_DATASOURCE_USERNAME:alimi}
+    password: ${SPRING_DATASOURCE_PASSWORD:alimi}
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    hikari:
+      maximum-pool-size: 10
+      pool-name: alimi-cp
+
+  jpa:
+    open-in-view: false
+    hibernate:
+      # 스키마 변경은 Flyway 가 담당하고, JPA 는 검증만 수행한다.
+      ddl-auto: validate
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.MySQLDialect
+        format_sql: true
+        jdbc:
+          time_zone: UTC
+
+  flyway:
+    # 로컬 개발 편의를 위해 앱이 직접 마이그레이션을 돌린다.
+    # k8s 에서는 꺼지고 별도 Job 이 담당한다 (application-k8s.yml).
+    enabled: true
+    baseline-on-migrate: true
+    locations: classpath:db/migration
+
+  kafka:
+    bootstrap-servers: ${SPRING_KAFKA_BOOTSTRAP_SERVERS:localhost:29092}
+    consumer:
+      group-id: ${SPRING_KAFKA_CONSUMER_GROUP_ID:alimi}
+      auto-offset-reset: earliest
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      # ⚠️ JsonDeserializer 를 직접 쓰지 않는다.
+      #
+      # 그렇게 하면 `spring.json.value.default.type` 으로 타입을 하나만 고정해야 하는데,
+      # 이벤트 타입이 여러 개(NotificationDispatch / NotificationCreatedEvent / ...)라
+      # 어떤 토픽을 듣든 그 하나로 역직렬화되어 깨진다.
+      #
+      # 대신 바이트로 받고 ByteArrayJsonMessageConverter(CoreKafkaConfig)가
+      # **@KafkaListener 메서드의 파라미터 타입**을 보고 역직렬화한다.
+      # 컨슈머가 여러 타입을 다루는 경우의 정석이다.
+      value-deserializer: org.apache.kafka.common.serialization.ByteArrayDeserializer
+      # Playwright 체크 1건이 수십 초 걸리므로 한 번에 1건만 가져온다.
+      max-poll-records: 1
+      properties:
+        # 이 값보다 처리가 오래 걸리면 컨슈머가 그룹에서 쫓겨나며 리밸런스가 돈다.
+        max.poll.interval.ms: 300000
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+      acks: all
+      properties:
+        # 타입 헤더를 붙이지 않는다. 컨슈머는 메서드 시그니처로 타입을 정하므로
+        # 헤더가 있으면 오히려 그쪽이 우선해 예측이 어려워진다.
+        spring.json.add.type.headers: false
+    listener:
+      missing-topics-fatal: false
+    admin:
+      # ⚠️ 이게 없으면 조용히 망가진다.
+      # 브로커가 아직 없으면 KafkaAdmin 이 ERROR 만 남기고 앱은 정상 기동하는데,
+      # NewTopic 빈이 만들려던 토픽은 하나도 안 만들어진다.
+      # k8s 에서는 차라리 기동에 실패하고 재시작되게 두는 쪽이 맞다.
+      fail-fast: true
+
+# 토픽 파티션 수 = 컨슈머 동시성 상한. 늘릴 수만 있고 줄일 수 없으며,
+# 늘리는 순간 key→partition 매핑이 바뀌어 productId 기준 순서 보장이 깨진다.
+# 그래서 처음부터 넉넉히 잡는다. (docs/DESIGN.md §5)
+alimi:
+  kafka:
+    partitions:
+      stock-check-requested: ${ALIMI_PARTITIONS_CHECK:12}
+      stock-restocked: ${ALIMI_PARTITIONS_RESTOCKED:6}
+      notification-dispatch: ${ALIMI_PARTITIONS_DISPATCH:6}
+  notification:
+    # 알림 본문에 찍히는 시각 기준. 사용자에게 보이는 값이라 KST.
+    time-zone: Asia/Seoul
+    email:
+      # log  = 실제로 안 보내고 로그만 (로컬 개발 기본값)
+      # smtp = 실제 발송. 아래 spring.mail 설정이 필요하다.
+      transport: ${ALIMI_EMAIL_TRANSPORT:log}
+      from: ${ALIMI_EMAIL_FROM:no-reply@jaeipgo.local}
+
+
+server:
+  port: ${SERVER_PORT:8080}
+  shutdown: graceful
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: when-authorized
+
+logging:
+  level:
+    com.jaeipgo.alimi: DEBUG
+
+# ── 알림 발송 ────────────────────────────────────────────────────
+# 채널을 추가하려면 NotificationSender 구현체를 하나 만들면 된다.
+# 호출하는 쪽(NotificationDispatchListener)은 수정하지 않는다.

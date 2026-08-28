@@ -1,0 +1,11 @@
+# docker-compose 로 실행할 때 (SPRING_PROFILES_ACTIVE=docker).
+# 값은 docker-compose.yml 이 주입하며, 여기서는 컨테이너 네트워크 기준 기본값을 둔다.
+spring:
+  datasource:
+    url: ${SPRING_DATASOURCE_URL:jdbc:mysql://mysql:3306/alimi?useUnicode=true&characterEncoding=UTF-8&serverTimezone=UTC&rewriteBatchedStatements=true}
+  kafka:
+    bootstrap-servers: ${SPRING_KAFKA_BOOTSTRAP_SERVERS:kafka:9092}
+
+logging:
+  level:
+    com.jaeipgo.alimi: INFO
