@@ -92,10 +92,17 @@ class SmartStoreLiveTest {
 
         listOf("out-of-stock" to soldOutUrl, "in-stock" to inStockUrl).forEach { (name, url) ->
             val snapshot = loader.load(url)
-            val json = ObjectMapper().writerWithDefaultPrettyPrinter()
-                .writeValueAsString(snapshot.preloadedState)
+
+            // 스냅샷 전체를 저장한다. preloadedState 만 저장했더니 그게 null 일 때
+            // "우리가 대체 어떤 페이지를 받았는가"를 알 길이 없었다.
+            val json = ObjectMapper().writerWithDefaultPrettyPrinter().writeValueAsString(snapshot)
             Files.writeString(target.resolve("$name.json"), json)
-            println("캡처: $name ← $url (버튼 ${snapshot.buttons.size}개, HTTP ${snapshot.httpStatus})")
+
+            println("캡처: $name ← $url")
+            println("   HTTP ${snapshot.httpStatus}  title=${snapshot.title}")
+            println("   최종 URL: ${snapshot.url}")
+            println("   상태객체: ${if (snapshot.preloadedState == null) "없음" else "있음"}")
+            println("   버튼(${snapshot.buttons.size}): ${snapshot.buttons.joinToString { "${it.text}${if (it.disabled) "[disabled]" else ""}" }}")
         }
     }
 }
