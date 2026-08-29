@@ -153,7 +153,10 @@ jobs:
   deploy:
     name: 배포 (라즈베리파이 k3s)
     runs-on: [self-hosted, linux, ARM64, alimi-pi]
-    timeout-minutes: 30
+    # 첫 배포는 Playwright 베이스(6.4GB)를 처음 받느라 이미지 빌드에만 20분 넘게 쓴다.
+    # 거기에 MySQL 최초 초기화(microSD 에서 느리다)까지 겹쳐 30분으로는 모자랐다.
+    # 베이스가 캐시된 뒤로는 5~10분이면 끝나지만, 상한은 첫 배포 기준으로 잡는다.
+    timeout-minutes: 90
     needs: [build, manifests]
     # rollback_to 로 수동 실행하면 build 가 skip 되므로 always() 로 받아준다.
     if: ${{ always() && needs.manifests.result == 'success' && (needs.build.result == 'success' || inputs.rollback_to) }}
