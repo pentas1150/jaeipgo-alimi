@@ -1,5 +1,7 @@
 # jaeipgo-alimi
 
+[![CI](https://github.com/pentas1150/jaeipgo-alimi/actions/workflows/ci.yml/badge.svg)](https://github.com/pentas1150/jaeipgo-alimi/actions/workflows/ci.yml)
+
 네이버 스마트 스토어 품절 상품 재입고 알림
 
 - **설계 문서** — [docs/DESIGN.md](docs/DESIGN.md)
@@ -94,6 +96,23 @@ open http://localhost:8080
 ./gradlew build          # 전 모듈 컴파일 + 테스트
 ./gradlew test           # 테스트 (Docker 필요 - Testcontainers)
 ./gradlew bootJar        # 앱 4종의 실행 가능 jar
+
+./gradlew :backend:app-checker:installChromium   # Playwright 브라우저 설치
+```
+
+## CI
+
+푸시(`main` / `feat/**` / `fix/**`)와 PR 에서 `.github/workflows/ci.yml` 이 돈다.
+job 세 개가 병렬로 실행된다 — 백엔드 빌드/테스트, 프론트 빌드, k8s 매니페스트 검증.
+
+CI 와 같은 것을 로컬에서 돌리려면:
+
+```bash
+./gradlew build                             # 백엔드
+(cd frontend && npm ci && npm run build)    # 프론트
+
+cp k8s/secret.env.example k8s/secret.env    # secretGenerator 가 이 파일을 읽는다
+kustomize build k8s/ | kubeconform -strict -summary -
 ```
 
 ## 회원 인증

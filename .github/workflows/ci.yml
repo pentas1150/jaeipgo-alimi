@@ -1,0 +1,134 @@
+name: CI
+
+on:
+  push:
+    # main 에 직접 푸시하는 워크플로라 PR 트리거만으로는 CI 가 거의 안 돈다.
+    branches: [main, 'feat/**', 'fix/**']
+  pull_request:
+
+# 같은 브랜치에 연속으로 푸시하면 이전 실행을 취소한다. 러너 시간을 아낀다.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    name: 백엔드 빌드 + 테스트
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      # 래퍼 jar 가 변조되지 않았는지 확인한다. 공급망 공격의 고전적인 경로다.
+      - uses: gradle/actions/wrapper-validation@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      # ⚠️ CheckerApplicationTests 는 @SpringBootTest 가 PlaywrightConfig 를 스캔해
+      # 진짜 Chromium 을 띄운다. 캐시가 없으면 매 실행마다 150MB 를 내려받는다.
+      #
+      # 키에 루트 build.gradle.kts 해시를 넣는다 — playwrightVersion 이 거기 있으므로
+      # 버전을 올리면 키가 저절로 바뀐다.
+      - name: Playwright 브라우저 캐시
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('build.gradle.kts') }}
+          restore-keys: playwright-${{ runner.os }}-
+
+      # 캐시가 맞아도 이 단계는 항상 돌린다.
+      # --with-deps 가 까는 apt 패키지는 ~/.cache/ms-playwright 밖에 있어서
+      # 캐시로 복원되지 않는다. 브라우저가 이미 있으면 거의 즉시 끝난다.
+      - name: Chromium 설치
+        run: ./gradlew :backend:app-checker:installChromium --no-daemon
+
+      # -Pexternal 을 넣지 않는다. SmartStoreLiveTest(@Tag("external"))가 돌면
+      # 네이버가 데이터센터 IP 를 차단하므로 반드시 깨진다.
+      - name: 빌드 + 테스트
+        run: ./gradlew build --no-daemon
+
+      - name: 테스트 리포트 (실패 시)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-reports
+          path: backend/*/build/reports/tests/
+          retention-days: 7
+
+  frontend:
+    name: 프론트엔드 빌드
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # Dockerfile 의 node:22-alpine 과 맞춘다.
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - run: npm ci
+        working-directory: frontend
+
+      - run: npm run build
+        working-directory: frontend
+
+  manifests:
+    name: k8s 매니페스트 검증
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      KUSTOMIZE_VERSION: '5.5.0'
+      KUBECONFORM_VERSION: '0.6.7'
+    steps:
+      - uses: actions/checkout@v4
+
+      # 자격증명은 매니페스트에 직접 쓰지 않는다는 게 이 리포지토리의 규칙이다.
+      # 규칙을 문서로만 두지 않고 CI 가 지키게 한다.
+      - name: secret.env 가 커밋되지 않았는지 확인
+        run: |
+          if git ls-files --error-unmatch k8s/secret.env 2>/dev/null; then
+            echo "::error::k8s/secret.env 가 커밋되어 있다. 자격증명이 리포지토리에 들어갔다."
+            exit 1
+          fi
+          echo "secret.env 는 추적되지 않는다 (정상)"
+
+      - name: 도구 설치
+        run: |
+          curl -sSL "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv${KUSTOMIZE_VERSION}/kustomize_v${KUSTOMIZE_VERSION}_linux_amd64.tar.gz" \
+            | tar xz -C /usr/local/bin kustomize
+          curl -sSL "https://github.com/yannh/kubeconform/releases/download/v${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz" \
+            | tar xz -C /usr/local/bin kubeconform
+          kustomize version && kubeconform -v
+
+      # secretGenerator 가 secret.env 를 읽는데 그 파일은 gitignore 되어 러너에 없다.
+      # 예제를 복사해 채운다 — 값은 로컬 kind 용 더미다.
+      - name: secret.env 채우기
+        run: cp k8s/secret.env.example k8s/secret.env
+
+      - name: kustomize 렌더 + 스키마 검증
+        run: kustomize build k8s/ | kubeconform -strict -summary -
+
+      # KEDA ScaledObject 는 CRD 라 kubeconform 에 내장 스키마가 없다.
+      # 커뮤니티 CRD 카탈로그를 스키마 출처로 붙이면 필드 오타까지 잡힌다.
+      # (maxReplicaCount 를 오타내고 돌려 실제로 잡는 것을 확인했다)
+      #
+      # -ignore-missing-schemas 를 함께 둔 이유: 카탈로그를 못 받아오면 검증을 건너뛰고
+      # 넘어가게 하려는 것이다. 외부 URL 장애로 CI 가 빨간불이 되지는 않게 한다.
+      - name: KEDA 매니페스트 검증
+        run: |
+          kubeconform -strict -summary \
+            -schema-location default \
+            -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
+            -ignore-missing-schemas \
+            k8s/keda/
