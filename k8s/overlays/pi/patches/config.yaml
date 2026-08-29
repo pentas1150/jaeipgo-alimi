@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: alimi-config
+  namespace: alimi
+data:
+  # ⚠️ 파티션 수는 늘릴 수만 있고 줄일 수 없다. 새 클러스터를 만드는 지금이
+  # 정할 수 있는 유일한 시점이다.
+  #
+  # base 의 12/6/6 은 워커를 12대까지 띄울 수 있을 때 의미가 있는데,
+  # 파이4 4GB 에서 checker 는 1대다. 파티션만 12개면 SD 카드에 로그 디렉터리
+  # 12개를 만들어 쓰기만 늘린다. 동시성 상한 = min(파티션, 노드 자원) 이므로
+  # 여기서는 파티션을 노드 현실에 맞춘다.
+  ALIMI_PARTITIONS_CHECK: "3"
+  ALIMI_PARTITIONS_RESTOCKED: "2"
+  ALIMI_PARTITIONS_DISPATCH: "2"

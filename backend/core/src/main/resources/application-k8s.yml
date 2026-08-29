@@ -8,11 +8,11 @@ spring:
     # 마이그레이션을 시도한다. Flyway 가 락을 잡아 안전하긴 하지만,
     # 롤링 배포 중에 **구버전 파드가 살아있는 상태로 스키마가 바뀔 수 있다.**
     #
-    # 대신 k8s/migration-job.yaml 이 배포 전에 단 한 번 실행한다.
+    # 대신 k8s/base/migration-job.yaml 이 배포 전에 단 한 번 실행한다.
     # 스키마가 없으면 JPA ddl-auto=validate 가 기동을 실패시키므로,
     # Job 이 끝날 때까지 앱은 CrashLoop 하다가 자동으로 회복된다.
     enabled: false
-  # SMTP 접속 정보는 Secret 으로 주입한다 (k8s/config.yaml).
+  # SMTP 접속 정보는 Secret 으로 주입한다 (k8s/base/config.yaml).
   # transport 를 smtp 로 바꾸기 전까지는 로그 전용 어댑터가 뜬다.
   mail:
     host: ${SPRING_MAIL_HOST:}

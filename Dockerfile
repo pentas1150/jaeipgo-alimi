@@ -9,9 +9,21 @@
 #
 # 앱 이미지는 MODULE build arg 로 어느 모듈의 jar 를 담을지 고른다.
 # 코드가 같으므로 build 스테이지는 캐시를 공유한다.
+#
+# 산출물을 어디서 가져올지는 LAYERS_FROM / FRONTEND_FROM 으로 고른다.
+#
+#   build          (기본) 이 Dockerfile 안에서 Gradle/npm 을 돌린다 — 로컬 · compose · kind
+#   prebuilt              러너가 미리 만든 dist/ 를 그대로 쓴다   — CD (라즈베리파이)
+#
+# 파이4(4GB)에서 Kotlin 6모듈을 컴파일하면 MySQL/Kafka/JVM 과 같은 메모리를 다툰다.
+# jar 는 아키텍처 무관이므로 컴파일은 호스티드 러너가 하고, 파이는 COPY 만 한다.
+# 스테이지를 파일로 나누지 않는 이유: 베이스 이미지와 JAVA_OPTS 가 두 벌이 되면 반드시 어긋난다.
+# 쓰이지 않는 스테이지는 buildkit 이 그래프에서 잘라내므로 비용이 없다.
 
 # Playwright Java 라이브러리 버전과 반드시 일치시킬 것 (build.gradle.kts 의 playwrightVersion).
 ARG PLAYWRIGHT_VERSION=1.62.0
+ARG LAYERS_FROM=build
+ARG FRONTEND_FROM=frontend-build
 
 ########################################
 # 1) Gradle 빌드 (모든 앱 모듈을 한 번에)
@@ -42,6 +54,17 @@ RUN for m in app-api app-scheduler app-checker app-notifier; do \
     done
 
 ########################################
+# 1-b) 미리 분해된 레이어 (CD 전용)
+########################################
+# 러너가 layertools 로 분해해 올린 결과물. 여기서는 파일을 옮기기만 한다.
+#   dist/extracted/<module>/{dependencies,spring-boot-loader,snapshot-dependencies,application}
+FROM scratch AS prebuilt
+COPY dist/extracted/ /extracted/
+
+# 아래 런타임 스테이지들은 이 별칭 하나만 본다.
+FROM ${LAYERS_FROM} AS layers
+
+########################################
 # 2) 앱 런타임 — 슬림 (api / scheduler / notifier)
 ########################################
 FROM eclipse-temurin:21-jre AS runtime
@@ -50,10 +73,10 @@ WORKDIR /app
 
 RUN groupadd --system app && useradd --system --gid app app
 
-COPY --from=build /extracted/${MODULE}/dependencies/ ./
-COPY --from=build /extracted/${MODULE}/spring-boot-loader/ ./
-COPY --from=build /extracted/${MODULE}/snapshot-dependencies/ ./
-COPY --from=build /extracted/${MODULE}/application/ ./
+COPY --from=layers /extracted/${MODULE}/dependencies/ ./
+COPY --from=layers /extracted/${MODULE}/spring-boot-loader/ ./
+COPY --from=layers /extracted/${MODULE}/snapshot-dependencies/ ./
+COPY --from=layers /extracted/${MODULE}/application/ ./
 
 USER app
 EXPOSE 8080
@@ -77,10 +100,10 @@ WORKDIR /app
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
     PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 
-COPY --from=build /extracted/app-checker/dependencies/ ./
-COPY --from=build /extracted/app-checker/spring-boot-loader/ ./
-COPY --from=build /extracted/app-checker/snapshot-dependencies/ ./
-COPY --from=build /extracted/app-checker/application/ ./
+COPY --from=layers /extracted/app-checker/dependencies/ ./
+COPY --from=layers /extracted/app-checker/spring-boot-loader/ ./
+COPY --from=layers /extracted/app-checker/snapshot-dependencies/ ./
+COPY --from=layers /extracted/app-checker/application/ ./
 
 RUN chown -R pwuser:pwuser /app
 USER pwuser
@@ -111,8 +134,14 @@ RUN npm install
 COPY frontend/ ./
 RUN npm run build
 
+# CD 에서는 러너가 만든 dist/frontend 를 그대로 쓴다.
+FROM scratch AS frontend-prebuilt
+COPY dist/frontend/ /fe/dist/
+
+FROM ${FRONTEND_FROM} AS fe
+
 FROM nginx:1.27-alpine AS frontend
 # Node 는 위 스테이지에서만 쓰였다. 최종 이미지에 Node 런타임은 없다.
 COPY frontend/nginx.conf /etc/nginx/conf.d/default.conf
-COPY --from=frontend-build /fe/dist /usr/share/nginx/html
+COPY --from=fe /fe/dist /usr/share/nginx/html
 EXPOSE 8080

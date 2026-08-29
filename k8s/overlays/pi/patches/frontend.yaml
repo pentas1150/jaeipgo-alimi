@@ -1,0 +1,24 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: alimi-frontend
+  namespace: alimi
+spec:
+  replicas: 1
+  template:
+    spec:
+      terminationGracePeriodSeconds: 20
+      containers:
+        - name: nginx
+          lifecycle:
+            preStop:
+              # nginx 는 SIGTERM 에 즉시 죽는다(fast shutdown). 엔드포인트 전파를
+              # 기다렸다가 nginx 스스로 graceful quit 하게 만든다.
+              exec:
+                command: ["sh", "-c", "sleep 5; nginx -s quit"]
+          resources:
+            requests:
+              memory: 24Mi
+              cpu: 20m
+            limits:
+              memory: 64Mi

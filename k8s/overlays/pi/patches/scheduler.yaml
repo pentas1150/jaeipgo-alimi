@@ -1,0 +1,22 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: alimi-scheduler
+  namespace: alimi
+spec:
+  # base 가 이미 replicas:1 + Recreate 다 (스케줄러가 2개면 배치가 중복 발행된다).
+  # 여기서는 자원만 줄인다.
+  template:
+    spec:
+      terminationGracePeriodSeconds: 75
+      containers:
+        - name: app
+          env:
+            - name: JAVA_OPTS
+              value: "-XX:MaxRAMPercentage=70.0 -XX:+UseSerialGC -Xss512k"
+          resources:
+            requests:
+              memory: 256Mi
+              cpu: 100m
+            limits:
+              memory: 384Mi

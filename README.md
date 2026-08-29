@@ -86,7 +86,7 @@ docker compose --profile app --profile tools up --build
 
 ```bash
 kind create cluster --config k8s/kind-cluster.yaml
-# ... 이미지 빌드/적재 → KEDA 설치 → kubectl apply -k k8s/
+# ... 이미지 빌드/적재 → KEDA 설치 → kubectl apply -k k8s/base/
 open http://localhost:8080
 ```
 
@@ -111,8 +111,8 @@ CI 와 같은 것을 로컬에서 돌리려면:
 ./gradlew build                             # 백엔드
 (cd frontend && npm ci && npm run build)    # 프론트
 
-cp k8s/secret.env.example k8s/secret.env    # secretGenerator 가 이 파일을 읽는다
-kustomize build k8s/ | kubeconform -strict -summary -
+cp k8s/base/secret.env.example k8s/base/secret.env    # secretGenerator 가 이 파일을 읽는다
+kustomize build k8s/base | kubeconform -strict -summary -
 ```
 
 ## 회원 인증

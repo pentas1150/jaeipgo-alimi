@@ -1,0 +1,88 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# 라즈베리파이4(4GB, arm64, microSD) 단일 노드 k3s 오버레이.
+#
+# base(`k8s/`)는 kind + KEDA 학습 환경 그대로 둔다. 파일을 옮기지 않았으므로
+# `kubectl apply -k k8s/` 절차와 CI 의 base 검증은 이 오버레이와 무관하게 계속 돈다.
+#
+# 여기서 base 와 달라지는 것은 딱 네 가지다:
+#   1. 자원 재배분    — 4GB 에 다 들어가게 (아래 표)
+#   2. replicas 고정  — KEDA 를 설치하지 않으므로 HPA 가 관리하던 필드를 여기서 정한다
+#   3. 무중단 보강    — api/frontend 의 preStop + grace, 나머지는 Recreate
+#   4. 노출/저장소    — NodePort 대신 Traefik Ingress, microSD 를 아끼는 Kafka/MySQL 설정
+#
+# ── 메모리 예산 (docs/DESIGN.md §12.10) ───────────────────────────────
+# MemTotal ~3,780Mi − system-reserved 1Gi − eviction 150Mi ⇒ allocatable ≈ 2,600Mi
+#
+# 스케줄러가 보는 것은 "실제 사용량"이 아니라 "request 합"이다. 그래서 둘을 나눠 센다.
+#
+#   우리 파드 request  mysql 384 + kafka 448 + api 288 + scheduler 256
+#                     + notifier 256 + checker 512 + frontend 24     = 2,168Mi
+#   k3s 시스템 파드    coredns 70Mi (traefik / local-path 는 request 미설정) ≈ 70Mi
+#   ──────────────────────────────────────────────────────────────────
+#   평시 2,238Mi  /  api 롤링 서지(+288Mi) 시 최대 2,456Mi  ← 2,600Mi 안에 들어간다
+#
+# 여유가 약 140Mi 다. 그래서 서지를 만드는 역할은 api 와 frontend 뿐이고,
+# 나머지(checker/notifier/scheduler)는 Recreate 다.
+#
+# ⚠️ request 는 넉넉히 잡는 게 아니라 **실제에 가깝게** 잡아야 한다. 낮춰 적으면
+# 스케줄러만 낙관적이 되고 노드는 그대로 터진다. 실사용 스파이크는 limit + zram 이 받는다.
+
+resources:
+  - ../../base
+  - ingress.yaml
+
+# CD 가 `kustomize edit set image alimi-api=alimi-api:<sha>` 로 이 값을 갈아끼운다.
+# 태그가 바뀌면 Deployment spec 이 바뀌므로 롤링 업데이트가 자연히 트리거되고,
+# `kubectl rollout undo` 는 이전 ReplicaSet(= 이전 SHA 이미지)으로 정확히 되돌아간다.
+# ⚠️ imagePullPolicy 는 IfNotPresent 여야 한다. 레지스트리가 없어서 Always 면 즉시 실패한다.
+images:
+  - name: alimi-api
+    newTag: local
+  - name: alimi-scheduler
+    newTag: local
+  - name: alimi-notifier
+    newTag: local
+  - name: alimi-checker
+    newTag: local
+  - name: alimi-frontend
+    newTag: local
+  - name: alimi-migration
+    newTag: local
+
+patches:
+  - path: patches/api.yaml
+  - path: patches/frontend.yaml
+  - path: patches/scheduler.yaml
+  - path: patches/notifier.yaml
+  - path: patches/checker.yaml
+  - path: patches/mysql.yaml
+  - path: patches/kafka.yaml
+  - path: patches/config.yaml
+  - path: patches/migration-job.yaml
+
+  # 구조를 바꾸는(필드를 지우는) 패치는 전략적 머지로 표현할 수 없어 JSON6902 로 간다.
+  # ① NodePort → ClusterIP: nodePort 필드가 남아 있으면 API 서버가 거부한다.
+  - target: { kind: Service, name: alimi-frontend }
+    patch: |-
+      - op: replace
+        path: /spec/type
+        value: ClusterIP
+      - op: remove
+        path: /spec/ports/0/nodePort
+  # ② RollingUpdate → Recreate: rollingUpdate 블록이 남아 있으면 API 서버가 거부한다.
+  #    컨슈머(checker/notifier)는 몇 초 멈춰도 사용자에게 안 보이고 Kafka 랙으로만 남는다.
+  #    대신 서지 파드를 안 만드니 4GB 에서 롤링이 Pending 으로 멈추지 않는다.
+  - target: { kind: Deployment, name: alimi-checker }
+    patch: |-
+      - op: replace
+        path: /spec/strategy
+        value:
+          type: Recreate
+  - target: { kind: Deployment, name: alimi-notifier }
+    patch: |-
+      - op: replace
+        path: /spec/strategy
+        value:
+          type: Recreate

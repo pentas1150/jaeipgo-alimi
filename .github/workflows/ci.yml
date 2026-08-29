@@ -2,8 +2,9 @@ name: CI
 
 on:
   push:
-    # main 에 직접 푸시하는 워크플로라 PR 트리거만으로는 CI 가 거의 안 돈다.
-    branches: [main, 'feat/**', 'fix/**']
+    # main 은 여기서 빼 뒀다 — cd.yml 이 같은 검증(빌드+테스트+매니페스트)을 배포 직전에
+    # 더 강하게 수행한다. 두 워크플로가 30분짜리 백엔드 잡을 동시에 두 번 돌릴 이유가 없다.
+    branches: ['feat/**', 'fix/**']
   pull_request:
 
 # 같은 브랜치에 연속으로 푸시하면 이전 실행을 취소한다. 러너 시간을 아낀다.
@@ -97,8 +98,8 @@ jobs:
       # 규칙을 문서로만 두지 않고 CI 가 지키게 한다.
       - name: secret.env 가 커밋되지 않았는지 확인
         run: |
-          if git ls-files --error-unmatch k8s/secret.env 2>/dev/null; then
-            echo "::error::k8s/secret.env 가 커밋되어 있다. 자격증명이 리포지토리에 들어갔다."
+          if git ls-files --error-unmatch k8s/base/secret.env 2>/dev/null; then
+            echo "::error::k8s/base/secret.env 가 커밋되어 있다. 자격증명이 리포지토리에 들어갔다."
             exit 1
           fi
           echo "secret.env 는 추적되지 않는다 (정상)"
@@ -114,10 +115,12 @@ jobs:
       # secretGenerator 가 secret.env 를 읽는데 그 파일은 gitignore 되어 러너에 없다.
       # 예제를 복사해 채운다 — 값은 로컬 kind 용 더미다.
       - name: secret.env 채우기
-        run: cp k8s/secret.env.example k8s/secret.env
+        run: cp k8s/base/secret.env.example k8s/base/secret.env
 
       - name: kustomize 렌더 + 스키마 검증
-        run: kustomize build k8s/ | kubeconform -strict -summary -
+        run: |
+          kustomize build k8s/base        | kubeconform -strict -summary -
+          kustomize build k8s/overlays/pi | kubeconform -strict -summary -
 
       # KEDA ScaledObject 는 CRD 라 kubeconform 에 내장 스키마가 없다.
       # 커뮤니티 CRD 카탈로그를 스키마 출처로 붙이면 필드 오타까지 잡힌다.

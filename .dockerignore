@@ -17,3 +17,7 @@ docker-compose*.yml
 !.env.example
 frontend/node_modules
 frontend/dist
+
+# CD 에서 러너가 만들어 넣는 산출물 (Dockerfile 의 prebuilt 스테이지가 읽는다).
+# frontend/dist 는 위에서 제외되지만 루트 dist/ 는 반드시 컨텍스트에 들어와야 한다.
+!dist

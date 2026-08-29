@@ -1,0 +1,275 @@
+name: CD
+
+# main 에 푸시되면 라즈베리파이4(arm64, k3s)에 무중단 배포한다.
+#
+# 빌드를 두 러너로 나눈 이유: 파이4(4GB)에서 Kotlin 6모듈을 컴파일하면 MySQL/Kafka/JVM 과
+# 같은 메모리를 다툰다. jar 는 아키텍처 무관하므로 **컴파일은 호스티드 러너**가 하고,
+# 파이는 COPY 뿐인 얇은 이미지 조립과 배포만 한다.
+#
+# ⚠️ self-hosted 러너에는 절대 pull_request 트리거를 붙이지 않는다.
+#    포크가 보낸 코드가 집 안 네트워크의 파이에서 실행된다.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      rollback_to:
+        description: '롤백할 이미지 태그(커밋 SHA 12자리). 비우면 현재 커밋으로 일반 배포.'
+        required: false
+        type: string
+
+# 배포는 절대 중간에 취소하지 않는다. 취소하면 마이그레이션과 롤아웃 사이에서 멈춘다.
+concurrency:
+  group: cd-production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  # ────────────────────────────────────────────────────────────────
+  build:
+    name: 산출물 빌드 (호스티드)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    # 롤백은 이미 파이에 있는 이미지를 다시 가리키는 것이므로 빌드가 필요 없다.
+    if: ${{ !inputs.rollback_to }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: gradle/actions/wrapper-validation@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: temurin
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Playwright 브라우저 캐시
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('build.gradle.kts') }}
+
+      - run: ./gradlew :backend:app-checker:installChromium --no-daemon
+
+      # 테스트를 포함해서 돌린다. CD 가 스스로 게이트가 된다 —
+      # 통과하지 못한 산출물은 파이에 닿지 않는다.
+      - name: 빌드 + 테스트
+        run: ./gradlew build --no-daemon
+
+      # Boot 레이어로 미리 분해해 둔다. 파이에서 JVM 을 돌리지 않기 위해서다.
+      # (Dockerfile 의 prebuilt 스테이지가 이 디렉터리 구조를 그대로 읽는다)
+      - name: bootJar 레이어 분해
+        run: |
+          for m in app-api app-scheduler app-checker app-notifier; do
+            mkdir -p "dist/extracted/$m"
+            (cd "dist/extracted/$m" && \
+              java -Djarmode=layertools -jar "$GITHUB_WORKSPACE/backend/$m/build/libs/app.jar" extract)
+          done
+
+      - name: 프론트엔드 정적 빌드
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+
+      - name: 프론트엔드 산출물 수집
+        run: |
+          mkdir -p dist/frontend
+          cp -r frontend/dist/. dist/frontend/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          retention-days: 3
+          # 이미 압축된 산출물이라 재압축은 시간만 쓴다.
+          compression-level: 1
+
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-reports
+          path: backend/*/build/reports/tests/
+          retention-days: 7
+
+  # ────────────────────────────────────────────────────────────────
+  manifests:
+    name: 매니페스트 검증 (호스티드)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      KUSTOMIZE_VERSION: '5.5.0'
+      KUBECONFORM_VERSION: '0.6.7'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Secret 이 커밋되지 않았는지
+        run: |
+          if git ls-files --error-unmatch k8s/base/secret.env 2>/dev/null; then
+            echo "::error::k8s/base/secret.env 가 추적되고 있다. 즉시 제거할 것."
+            exit 1
+          fi
+
+      - name: 도구 설치
+        run: |
+          curl -sSLo /tmp/kustomize.tar.gz \
+            "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv${KUSTOMIZE_VERSION}/kustomize_v${KUSTOMIZE_VERSION}_linux_amd64.tar.gz"
+          curl -sSLo /tmp/kubeconform.tar.gz \
+            "https://github.com/yannh/kubeconform/releases/download/v${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz"
+          sudo tar -xzf /tmp/kustomize.tar.gz   -C /usr/local/bin kustomize
+          sudo tar -xzf /tmp/kubeconform.tar.gz -C /usr/local/bin kubeconform
+
+      # 파이에 apply 되기 전에 여기서 깨진다. self-hosted 러너를 헛돌리지 않는다.
+      - name: base + pi 오버레이 검증
+        run: |
+          cp k8s/base/secret.env.example k8s/base/secret.env
+          kustomize build k8s/base           | kubeconform -strict -summary -
+          kustomize build k8s/overlays/pi    | kubeconform -strict -summary -
+
+      - name: KEDA CRD 검증 (kind 전용 경로)
+        run: |
+          kubeconform -strict -summary -ignore-missing-schemas \
+            -schema-location default \
+            -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
+            k8s/keda/
+
+  # ────────────────────────────────────────────────────────────────
+  deploy:
+    name: 배포 (라즈베리파이 k3s)
+    runs-on: [self-hosted, linux, ARM64, alimi-pi]
+    timeout-minutes: 30
+    needs: [build, manifests]
+    # rollback_to 로 수동 실행하면 build 가 skip 되므로 always() 로 받아준다.
+    if: ${{ always() && needs.manifests.result == 'success' && (needs.build.result == 'success' || inputs.rollback_to) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 배포 태그 결정
+        id: tag
+        run: |
+          if [ -n "${{ inputs.rollback_to }}" ]; then
+            echo "value=${{ inputs.rollback_to }}" >> "$GITHUB_OUTPUT"
+            echo "mode=rollback"                   >> "$GITHUB_OUTPUT"
+          else
+            echo "value=${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
+            echo "mode=deploy"             >> "$GITHUB_OUTPUT"
+          fi
+
+      - if: steps.tag.outputs.mode == 'deploy'
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      # secret.env 는 리포지토리에 없다. 배포 때만 만들고 끝나면 지운다.
+      - name: Secret 파일 생성
+        env:
+          ALIMI_SECRET_ENV: ${{ secrets.ALIMI_SECRET_ENV }}
+        run: |
+          umask 077
+          printf '%s\n' "$ALIMI_SECRET_ENV" > k8s/base/secret.env
+          # secret 이 비었으면 printf 가 개행 1바이트를 남기므로 `test -s` 로는 안 걸린다.
+          # 반드시 있어야 하는 키로 확인한다.
+          for k in MYSQL_ROOT_PASSWORD MYSQL_DATABASE MYSQL_USER MYSQL_PASSWORD; do
+            grep -q "^${k}=" k8s/base/secret.env \
+              || { echo "::error::secrets.ALIMI_SECRET_ENV 에 ${k} 가 없다"; exit 1; }
+          done
+
+      # 전부 COPY 뿐이라 수 초에 끝난다. buildkit 이 k3s containerd(k8s.io 네임스페이스)에
+      # 직접 굽기 때문에 docker save → ctr import 로 microSD 를 갈아먹지 않는다.
+      - name: 이미지 빌드 (containerd 에 직접)
+        if: steps.tag.outputs.mode == 'deploy'
+        env:
+          TAG: ${{ steps.tag.outputs.value }}
+        run: |
+          set -euo pipefail
+          # ⚠️ --address 를 반드시 준다. nerdctl 의 기본 소켓은
+          #    /run/containerd/containerd.sock 인데 k3s 는 /run/k3s/... 를 쓴다.
+          #    --namespace 만 주면 "cannot access containerd socket" 으로 죽는다.
+          SOCK=/run/k3s/containerd/containerd.sock
+          build() { sudo nerdctl --address "$SOCK" --namespace k8s.io build --progress plain "$@" . ; }
+          for m in api scheduler notifier; do
+            build --target runtime \
+                  --build-arg LAYERS_FROM=prebuilt --build-arg MODULE="app-$m" \
+                  -t "alimi-$m:$TAG"
+          done
+          build --target runtime-playwright --build-arg LAYERS_FROM=prebuilt -t "alimi-checker:$TAG"
+          build --target migration                                          -t "alimi-migration:$TAG"
+          build --target frontend --build-arg FRONTEND_FROM=frontend-prebuilt -t "alimi-frontend:$TAG"
+
+      - name: 매니페스트 렌더 (이미지 태그 고정)
+        env:
+          TAG: ${{ steps.tag.outputs.value }}
+        run: |
+          set -euo pipefail
+          cd k8s/overlays/pi
+          for r in api scheduler notifier checker frontend migration; do
+            kustomize edit set image "alimi-$r=alimi-$r:$TAG"
+          done
+          cd -
+          kustomize build k8s/overlays/pi > /tmp/alimi-rendered.yaml
+          grep -E '^\s+image: alimi-' /tmp/alimi-rendered.yaml | sort -u
+
+      # ── 1단계: 인프라 + 스키마. 앱보다 먼저 끝나야 한다. ──────────────
+      # 순서를 강제하지 않으면 새 파드가 ddl-auto=validate 로 CrashLoop 하다가
+      # progressDeadlineSeconds(600s)에 걸려 배포가 실패로 뒤집힌다.
+      - name: 1단계 — 인프라 적용
+        run: kubectl apply -f /tmp/alimi-rendered.yaml -l alimi.stage=infra
+
+      # 이름이 고정된 Job 은 spec 이 바뀌면 apply 로 갱신되지 않는다(immutable field).
+      # 지우고 다시 만든다.
+      - name: 마이그레이션 실행
+        run: |
+          set -euo pipefail
+          kubectl -n alimi delete job alimi-migration --ignore-not-found --wait=true
+          kubectl apply -f /tmp/alimi-rendered.yaml -l alimi.stage=infra
+          kubectl -n alimi wait --for=condition=complete job/alimi-migration --timeout=600s \
+            || { kubectl -n alimi logs job/alimi-migration --tail=100; exit 1; }
+
+      # ── 2단계: 앱 롤링 업데이트 ────────────────────────────────────
+      - name: 2단계 — 앱 배포
+        run: |
+          set -euo pipefail
+          kubectl apply -f /tmp/alimi-rendered.yaml
+          for d in alimi-api alimi-frontend alimi-scheduler alimi-notifier alimi-checker; do
+            kubectl -n alimi rollout status "deploy/$d" --timeout=600s
+          done
+
+      - name: 스모크 테스트
+        run: |
+          set -euo pipefail
+          ing="$(kubectl -n alimi get ingress alimi -o jsonpath='{.status.loadBalancer.ingress[0].ip}')"
+          : "${ing:=127.0.0.1}"
+          curl -fsS --retry 5 --retry-delay 3 "http://${ing}/healthz" | grep -q ok
+          curl -fsS --retry 5 --retry-delay 3 "http://${ing}/api/actuator/health" | grep -q '"status":"UP"'
+          echo "OK — frontend + api 모두 응답"
+
+      # 롤아웃이나 스모크가 실패하면 직전 ReplicaSet 으로 되돌린다.
+      # 이전 SHA 이미지는 prune 스크립트가 KEEP 개까지 보존하므로 노드에 남아 있다.
+      - name: 실패 시 롤백
+        if: failure()
+        run: |
+          for d in alimi-api alimi-frontend alimi-scheduler alimi-notifier alimi-checker; do
+            kubectl -n alimi rollout undo "deploy/$d" || true
+          done
+          kubectl -n alimi get pods -o wide
+          echo "::error::배포 실패 — 직전 버전으로 되돌렸다. 스키마는 되돌아가지 않는다(Flyway 에 down 이 없다)."
+
+      - name: 이미지 정리
+        if: always() && steps.tag.outputs.mode == 'deploy'
+        run: ./scripts/prune-images.sh "${{ steps.tag.outputs.value }}"
+
+      - name: 작업 파일 삭제
+        if: always()
+        run: |
+          shred -u k8s/base/secret.env 2>/dev/null || rm -f k8s/base/secret.env
+          rm -rf dist /tmp/alimi-rendered.yaml

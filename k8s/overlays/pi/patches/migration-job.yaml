@@ -1,0 +1,16 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: alimi-migration
+  namespace: alimi
+spec:
+  template:
+    spec:
+      containers:
+        - name: flyway
+          resources:
+            requests:
+              memory: 192Mi
+              cpu: 100m
+            limits:
+              memory: 384Mi
