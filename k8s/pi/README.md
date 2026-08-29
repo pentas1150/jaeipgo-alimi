@@ -310,6 +310,9 @@ kubectl -n alimi get deploy -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}
 | Chromium 탭이 가끔 죽는다 | `/dev/shm` 이 기본 64MB 로 돌아갔는지 확인 (volumeMount 누락). |
 | 디스크 부족 | `./scripts/prune-images.sh <현재태그>` 를 손으로 실행. checker 이미지만 6.4GB 다. |
 | 배포가 마이그레이션에서 멈춘다 | `kubectl -n alimi logs job/alimi-migration` |
+| StatefulSet 파드가 옛 설정으로 계속 돈다 | **StatefulSet 은 파드가 Ready 가 아니면 업데이트하지 않는다.** Ready 를 막는 버그는 자기 수정을 스스로 차단한다. CD 가 자동으로 풀지만 손으로 하려면 `kubectl -n alimi delete pod kafka-0` (DESIGN §12.11 ④) |
+| exec 프로브가 계속 `command timed out` | `timeoutSeconds` 기본값이 **1초**다. JVM 도구는 절대 못 넘긴다 (§12.11 ③) |
+| 마이그레이션이 `RSA public key is not available` | Flyway 는 MariaDB 드라이버 + MySQL 8.4 조합. URL 에 `allowPublicKeyRetrieval=true` 확인 (§12.11 ⑤) |
 
 ---
 

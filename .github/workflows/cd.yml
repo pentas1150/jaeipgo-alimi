@@ -11,6 +11,12 @@ name: CD
 on:
   push:
     branches: [main]
+    # 문서만 바뀐 푸시로 20분짜리 배포를 돌리지 않는다.
+    # (배포에 영향을 주는 파일은 여기 넣지 말 것 — k8s/, Dockerfile, backend/ 등)
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+      - 'LICENSE'
   workflow_dispatch:
     inputs:
       rollback_to:
