@@ -296,6 +296,31 @@ jobs:
       # application.yml 의 spring.kafka.admin.fail-fast: true 때문에 브로커가 없으면
       # 앱 4개가 전부 기동에 실패한다(DESIGN §12.6 ④). 이 게이트가 없으면 그 사실이
       # "rollout status 가 600초 뒤 타임아웃" 이라는 애매한 형태로만 드러난다.
+      # ⚠️ StatefulSet 은 파드가 Ready 가 아니면 롤링 업데이트를 진행하지 않는다.
+      # 그래서 "프로브가 틀려서 Ready 가 안 되는" 상황에서는 그 프로브 수정이
+      # 영원히 적용되지 않는 교착이 생긴다 — 실제로 겪었다. kafka-0 이 78분간
+      # 옛 프로브로 돌면서 x478 회 실패했고, 새 템플릿은 적용되지 못했다.
+      # (쿠버네티스 문서의 "forced rollback" 이 다루는 상황이다)
+      #
+      # 파드의 controller-revision-hash 가 StatefulSet 의 updateRevision 과
+      # 다르면 옛 리비전에 갇힌 것이므로 지워서 재생성시킨다.
+      - name: 인프라 파드 리비전 동기화
+        run: |
+          set -euo pipefail
+          sync() {
+            local sts="$1" pod="$2" want have
+            want="$(kubectl -n alimi get sts "$sts" -o jsonpath='{.status.updateRevision}' 2>/dev/null || true)"
+            have="$(kubectl -n alimi get pod "$pod" -o jsonpath='{.metadata.labels.controller-revision-hash}' 2>/dev/null || true)"
+            if [ -n "$want" ] && [ -n "$have" ] && [ "$want" != "$have" ]; then
+              echo "  $pod: 옛 리비전 $have → 삭제하고 $want 로 재생성"
+              kubectl -n alimi delete pod "$pod" --wait=true --timeout=120s
+            else
+              echo "  $pod: 최신 리비전 ($have)"
+            fi
+          }
+          sync kafka kafka-0
+          sync mysql mysql-0
+
       - name: 인프라 Ready 확인
         run: |
           set -euo pipefail

@@ -101,7 +101,9 @@ spec:
           readinessProbe:
             tcpSocket:
               port: 9092
-            initialDelaySeconds: 30
+            # tcpSocket 은 값싸다(프로세스를 안 띄운다). 30초를 그냥 버릴 이유가 없고,
+            # 늦게 뜨는 것은 failureThreshold 가 흡수한다.
+            initialDelaySeconds: 10
             periodSeconds: 10
             timeoutSeconds: 3
             failureThreshold: 20
