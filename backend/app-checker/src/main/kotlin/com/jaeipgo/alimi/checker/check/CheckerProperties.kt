@@ -35,13 +35,15 @@ data class CheckerProperties(
     val stateWaitTimeoutMs: Double = 10_000.0,
 
     /**
-     * 쿠키 워밍업에 방문할 URL.
+     * 쿠키 워밍업에 방문할 URL. **비워두면 상품 URL 에서 스토어 홈을 유도한다** (권장).
      *
-     * 네이버는 쿠키가 없는 요청을 거부하는 것으로 보인다(측정: docs/DESIGN.md §7).
-     * 기동 시 한 번 들러 쿠키를 확보하고, 이후 체크는 그 쿠키를 물려받는다.
-     * 빈 문자열이면 워밍업을 하지 않는다.
+     * 네이버는 쿠키 없는 요청을 거부한다. 먼저 스토어를 한 번 들러 쿠키를 확보하고
+     * 이후 체크가 그 쿠키를 물려받는다.
+     *
+     * ⚠️ 여기에 `https://smartstore.naver.com` 을 넣으면 안 된다 — 판매자 센터로
+     * 리다이렉트되어 로그인을 요구하고, 그 쿠키로는 상품 페이지가 전부 로그인 페이지가 된다.
      */
-    val warmupUrl: String = "https://smartstore.naver.com",
+    val warmupUrl: String = "",
 
     /** 워밍업 쿠키를 다시 받아올 조건. BLOCKED 가 이 횟수만큼 연속되면 재워밍업한다. */
     val rewarmAfterConsecutiveBlocks: Int = 3,

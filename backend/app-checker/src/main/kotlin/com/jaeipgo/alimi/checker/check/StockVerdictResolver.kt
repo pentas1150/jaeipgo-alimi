@@ -77,8 +77,20 @@ class StockVerdictResolver {
         return CheckResult(outcome, "${F.FIELD_STATUS_TYPE}=$statusType", name, stock)
     }
 
+    /**
+     * 2xx 가 아니면 전부 BLOCKED 로 본다. 코드를 하나씩 열거하지 않는 게 요점이다.
+     *
+     * 네이버는 429 말고도 **490 같은 비표준 코드**를 쓴다(실측). 아는 코드만 처리하면
+     * 모르는 코드가 UNKNOWN 으로 새고, 그러면 consecutive_failures 가 올라가
+     * 상대 쪽 사정 때문에 감시 목록 전체가 SUSPENDED 로 내려간다.
+     *
+     * 5xx 도 BLOCKED 로 묶는다 — 상대 서버 문제이지 우리 셀렉터가 깨진 게 아니다.
+     * 대응(백오프, 실패 카운터 건드리지 않음)이 같으므로 같은 결과로 둔다.
+     */
     private fun blockedReason(snapshot: PageSnapshot): String? {
-        if (snapshot.httpStatus == 429) return "HTTP 429"
+        val status = snapshot.httpStatus
+        if (status != null && status !in 200..299) return "HTTP $status"
+
         val title = snapshot.title ?: return null
         val marker = F.BLOCK_PAGE_MARKERS.firstOrNull { title.contains(it) } ?: return null
         return "차단 페이지 표식: $marker"

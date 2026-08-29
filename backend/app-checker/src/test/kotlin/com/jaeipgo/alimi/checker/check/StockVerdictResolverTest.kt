@@ -137,6 +137,25 @@ class StockVerdictResolverTest {
             assertThat(result.outcome).isNotEqualTo(CheckOutcome.UNKNOWN)
         }
 
+        /**
+         * 네이버는 429 말고 490 같은 비표준 코드도 쓴다(실측).
+         * 아는 코드만 처리하면 모르는 코드가 UNKNOWN 으로 새고, 그러면 차단 한 번에
+         * 감시 목록 전체가 SUSPENDED 로 내려간다.
+         */
+        @Test
+        fun `모르는 비정상 코드도 BLOCKED — 490`() {
+            val result = resolver.resolve(snapshot(soldOutUrl, httpStatus = 490, title = ""))
+
+            assertThat(result.outcome).isEqualTo(CheckOutcome.BLOCKED)
+            assertThat(result.outcome).isNotEqualTo(CheckOutcome.UNKNOWN)
+        }
+
+        @Test
+        fun `5xx 도 BLOCKED — 우리 셀렉터가 깨진 게 아니다`() {
+            assertThat(resolver.resolve(snapshot(soldOutUrl, httpStatus = 503)).outcome)
+                .isEqualTo(CheckOutcome.BLOCKED)
+        }
+
         @Test
         fun `404 는 NOT_FOUND`() {
             assertThat(resolver.resolve(snapshot(soldOutUrl, httpStatus = 404)).outcome)

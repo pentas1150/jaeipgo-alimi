@@ -67,4 +67,19 @@ object SmartStoreFields {
 
     fun productNoFrom(url: String): Long? =
         PRODUCT_NO_PATTERN.find(url)?.groupValues?.get(1)?.toLongOrNull()
+
+    /**
+     * 상품 URL 에서 그 상품이 속한 **스토어 홈** URL 을 만든다.
+     *
+     * `https://smartstore.naver.com/ufodripper/products/123` → `https://smartstore.naver.com/ufodripper`
+     *
+     * 쿠키 워밍업에 쓴다. ⚠️ 스마트스토어 **루트**(`https://smartstore.naver.com`)를 쓰면 안 된다 —
+     * 그건 판매자 센터(`sell.smartstore.naver.com`)로 리다이렉트되고 로그인을 요구한다.
+     * 거기서 받은 쿠키를 물려주면 상품 페이지 요청이 전부 로그인 페이지로 끌려간다.
+     * (그 증상은 HTTP 200 + `title=NAVER 로그인` 으로 나타나 차단처럼 보이지 않는다)
+     */
+    private val STORE_HOME_PATTERN = Regex("""^(https?://[^/]+/[^/?#]+)""")
+
+    fun storeHomeFrom(url: String): String? =
+        STORE_HOME_PATTERN.find(url)?.groupValues?.get(1)
 }

@@ -32,7 +32,7 @@ class PlaywrightSnapshotLoader(
     private var storageState: String? = null
 
     fun load(url: String): PageSnapshot {
-        ensureWarmedUp()
+        ensureWarmedUp(url)
 
         return newContext().use { context ->
             val page = context.newPage()
@@ -95,8 +95,14 @@ class PlaywrightSnapshotLoader(
      * curl 도, 새 프로필 헤드리스 Chrome 도 전부 차단됐고
      * 쿠키를 가진 평소 브라우저만 통과했다. (docs/DESIGN.md §7)
      */
-    private fun ensureWarmedUp() {
-        if (storageState != null || properties.warmupUrl.isBlank()) return
+    private fun ensureWarmedUp(productUrl: String) {
+        if (storageState != null) return
+
+        // 설정으로 못 박지 않고 **지금 보려는 상품의 스토어 홈**에서 받는다.
+        // 루트(smartstore.naver.com)는 판매자 센터로 리다이렉트되어 로그인을 요구한다.
+        val warmupUrl = properties.warmupUrl.ifBlank { null }
+            ?: SmartStoreFields.storeHomeFrom(productUrl)
+            ?: return
 
         synchronized(this) {
             if (storageState != null) return
@@ -109,14 +115,14 @@ class PlaywrightSnapshotLoader(
                         .setUserAgent(properties.userAgent),
                 ).use { context ->
                     context.newPage().navigate(
-                        properties.warmupUrl,
+                        warmupUrl,
                         Page.NavigateOptions()
                             .setWaitUntil(WaitUntilState.DOMCONTENTLOADED)
                             .setTimeout(properties.navigationTimeoutMs),
                     )
                     storageState = context.storageState()
                 }
-                log.info("쿠키 워밍업 완료: {}", properties.warmupUrl)
+                log.info("쿠키 워밍업 완료: {}", warmupUrl)
             }.onFailure {
                 // 워밍업 실패가 체크 실패는 아니다. 쿠키 없이 시도해보고 판정기가 BLOCKED 를 내면 된다.
                 log.warn("쿠키 워밍업 실패 — 쿠키 없이 진행한다: {}", it.message)

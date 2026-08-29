@@ -71,13 +71,14 @@ JPA `ddl-auto=validate` 이므로 엔티티와 스키마가 어긋나면 기동�
 구현된 것:
 - **알림 발송 추상화** (`app-notifier/send/`) — 포트 + 이메일/로그 어댑터 + 재시도 정책. 테스트 10개
 - `notification_log` 멱등성 (V2 마이그레이션)
-- **재고 판정** (`app-checker/check/`) — 판정을 순수 함수로 분리 + Playwright 로더. 테스트 16개
+- **재고 판정** (`app-checker/check/`) — 판정을 순수 함수로 분리 + Playwright 로더. 테스트 18개
 
 아직 없는 것:
 - `Topics.kt` 의 실제 토픽들은 **생성만 되고 프로듀서/컨슈머가 없다**
 - `app-checker` 는 판정만 하고 **Kafka 에 붙어있지 않다** (다음 단계)
-- **네이버 차단이 미해결이다.** 쿠키 워밍업으로 200을 받았지만 상태 객체가 없는 경우를 봤고,
-  차단이 고정이 아니라 속도 제한이라 재현이 들쭉날쭉하다. 상세는 DESIGN §7.1
+- **네이버 접근이 미해결이다.** 워밍업 URL 오류(루트 → 판매자 센터 → 로그인 리다이렉트)는
+  잡았지만, 지금은 `490` 을 받는다. 봇 감지인지 속도 제한인지 미확정이다.
+  **간격을 충분히 두고 1회만** 시도해서 확인할 것. 상세와 교훈은 DESIGN §7.1
 - `notification.dispatch.v1` 은 **컨슈머만 있고 프로듀서가 없다** (팬아웃 미구현)
 - 이메일은 기본이 `log` 어댑터다. 실제 발송하려면 `alimi.notification.email.transport=smtp`
 - Spring Batch (`spring-boot-starter-batch`) 미추가 — 메타데이터 테이블 마이그레이션과 함께 도입
