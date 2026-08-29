@@ -10,6 +10,12 @@ spec:
       terminationGracePeriodSeconds: 20
       containers:
         - name: nginx
+          readinessProbe:
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            periodSeconds: 20
+            timeoutSeconds: 5
           lifecycle:
             preStop:
               # nginx 는 SIGTERM 에 즉시 죽는다(fast shutdown). 엔드포인트 전파를

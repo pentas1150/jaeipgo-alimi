@@ -88,14 +88,22 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /var/lib/kafka
+          # ⚠️ 여기에 kafka-broker-api-versions 를 쓰면 안 된다.
+          #
+          # 그건 JVM 도구다. exec 프로브의 timeoutSeconds 기본값은 **1초**인데
+          # JVM 은 그 안에 뜨지 못한다(라즈베리파이4에서는 10초 이상). 즉 프로브가
+          # 영원히 실패하고 파드는 계속 0/1 로 남는다 — 실제로 54분간 그랬다.
+          # 게다가 10초마다 컨테이너(limit 640Mi) 안에 JVM 을 새로 띄우는 셈이라
+          # 4GB 노드에서는 그 자체가 낭비다.
+          #
+          # KRaft 단일 브로커는 메타데이터를 다 읽은 뒤에야 9092 를 연다.
+          # 그래서 포트가 열렸다는 것이 "이제 클라이언트를 받을 수 있다"와 거의 같다.
           readinessProbe:
-            exec:
-              command:
-                - sh
-                - -c
-                - "kafka-broker-api-versions --bootstrap-server localhost:9092 >/dev/null 2>&1"
+            tcpSocket:
+              port: 9092
             initialDelaySeconds: 30
             periodSeconds: 10
+            timeoutSeconds: 3
             failureThreshold: 20
           livenessProbe:
             tcpSocket:

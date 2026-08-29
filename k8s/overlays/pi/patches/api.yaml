@@ -18,6 +18,22 @@ spec:
       terminationGracePeriodSeconds: 75
       containers:
         - name: app
+          # 파이4 기준 재조정. 라즈베리파이에서 Spring Boot 기동은 랩탑의 몇 배다.
+          #   - startup 예산 150s → 400s (모자라면 CrashLoop 처럼 보이고 배포가 20분 낭비된다)
+          #   - httpGet timeout 1s(기본) → 5s. 부하 걸린 노드에서 actuator 가
+          #     1초를 넘기면 liveness 가 멀쩡한 파드를 죽인다.
+          startupProbe:
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 40
+          readinessProbe:
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 5
           lifecycle:
             preStop:
               exec:

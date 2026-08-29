@@ -250,7 +250,9 @@ MYSQL_PASSWORD=...
 kubectl -n alimi get pods -o wide          # Pending 이 하나도 없어야 한다
 kubectl -n alimi get ingress
 curl -s http://localhost/healthz
-curl -s http://localhost/api/actuator/health
+# ⚠️ actuator 는 Ingress 로 안 나온다. nginx 의 location /api/ 는 원본 URI 를 그대로
+# 넘기는데 actuator 는 /actuator/** 이고 컨트롤러만 /api/** 다. 클러스터 안에서 친다:
+kubectl -n alimi exec deploy/alimi-frontend -- wget -qO- http://alimi-api:8080/actuator/health
 ```
 
 ---

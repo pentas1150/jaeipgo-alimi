@@ -211,6 +211,23 @@ jobs:
 
       # 전부 COPY 뿐이라 수 초에 끝난다. buildkit 이 k3s containerd(k8s.io 네임스페이스)에
       # 직접 굽기 때문에 docker save → ctr import 로 microSD 를 갈아먹지 않는다.
+      - name: 디스크 여유 확인
+        if: steps.tag.outputs.mode == 'deploy'
+        run: |
+          set -euo pipefail
+          df -h /
+          avail_mb=$(df -Pm / | awk 'NR==2 {print $4}')
+          # checker 이미지만 6.4GB 다. 빌드 도중에 차면 원인이 한참 안 보인다.
+          if [ "$avail_mb" -lt 3072 ]; then
+            echo "여유 ${avail_mb}MB — buildkit 캐시부터 정리한다"
+            sudo nerdctl --address /run/k3s/containerd/containerd.sock \
+              builder prune --force --keep-storage 2GB || true
+            df -h /
+            avail_mb=$(df -Pm / | awk 'NR==2 {print $4}')
+            [ "$avail_mb" -ge 2048 ] \
+              || { echo "::error::디스크 여유 ${avail_mb}MB. scripts/prune-images.sh 로 정리 필요"; exit 1; }
+          fi
+
       - name: 이미지 빌드 (containerd 에 직접)
         if: steps.tag.outputs.mode == 'deploy'
         env:
@@ -274,23 +291,85 @@ jobs:
             exit 1
           }
 
+      # ⚠️ 앱을 올리기 전에 인프라가 실제로 Ready 인지 확인한다.
+      #
+      # application.yml 의 spring.kafka.admin.fail-fast: true 때문에 브로커가 없으면
+      # 앱 4개가 전부 기동에 실패한다(DESIGN §12.6 ④). 이 게이트가 없으면 그 사실이
+      # "rollout status 가 600초 뒤 타임아웃" 이라는 애매한 형태로만 드러난다.
+      - name: 인프라 Ready 확인
+        run: |
+          set -euo pipefail
+          fail() {
+            echo "::group::$1 진단"
+            kubectl -n alimi describe pod "$1" | sed -n '/^Events:/,$p' || true
+            kubectl -n alimi logs "$1" --tail=60 || true
+            echo "::endgroup::"
+            exit 1
+          }
+          kubectl -n alimi wait --for=condition=ready pod/mysql-0 --timeout=300s || fail mysql-0
+          kubectl -n alimi wait --for=condition=ready pod/kafka-0 --timeout=300s || fail kafka-0
+          # Ingress 입구. 이게 없으면 스모크가 "connection refused" 로만 실패해 원인이 안 보인다.
+          kubectl -n kube-system rollout status deploy/traefik --timeout=180s
+          echo "mysql-0 / kafka-0 / traefik Ready"
+
       # ── 2단계: 앱 롤링 업데이트 ────────────────────────────────────
       - name: 2단계 — 앱 배포
         run: |
           set -euo pipefail
           kubectl apply -f /tmp/alimi-rendered.yaml
+          rc=0
           for d in alimi-api alimi-frontend alimi-scheduler alimi-notifier alimi-checker; do
-            kubectl -n alimi rollout status "deploy/$d" --timeout=600s
+            kubectl -n alimi rollout status "deploy/$d" --timeout=420s || { rc=1; break; }
           done
+          if [ "$rc" -ne 0 ]; then
+            # 왜 안 떴는지 한 번에 보여준다. 배포 1회가 20분이라 왕복을 줄여야 한다.
+            echo "::group::파드 상태"
+            kubectl -n alimi get pods -o wide
+            echo "::endgroup::"
+            echo "::group::Pending / 실패 파드 이벤트"
+            kubectl -n alimi get pods --no-headers \
+              | awk '$3!="Running" && $3!="Completed" {print $1}' \
+              | while read -r pod; do
+                  echo "--- $pod"
+                  kubectl -n alimi describe pod "$pod" | sed -n '/^Events:/,$p' | tail -15
+                  kubectl -n alimi logs "$pod" --tail=40 --all-containers 2>/dev/null || true
+                done
+            echo "::endgroup::"
+            echo "::group::노드 자원"
+            kubectl describe node | sed -n '/Allocated resources/,/Events/p' | head -14
+            echo "::endgroup::"
+            exit 1
+          fi
 
       - name: 스모크 테스트
         run: |
           set -euo pipefail
           ing="$(kubectl -n alimi get ingress alimi -o jsonpath='{.status.loadBalancer.ingress[0].ip}')"
           : "${ing:=127.0.0.1}"
+
+          # ① Traefik → Service → nginx
           curl -fsS --retry 5 --retry-delay 3 "http://${ing}/healthz" | grep -q ok
-          curl -fsS --retry 5 --retry-delay 3 "http://${ing}/api/actuator/health" | grep -q '"status":"UP"'
-          echo "OK — frontend + api 모두 응답"
+          echo "  ① Ingress → frontend OK"
+
+          # ② api 자체의 health.
+          # ⚠️ Ingress 로는 확인할 수 없다. nginx 의 `location /api/` 는 proxy_pass 에
+          # 경로가 없어 **원본 URI 를 그대로** 넘기는데, actuator 는 /actuator/** 에 있고
+          # 컨트롤러만 /api/** 에 있다. 즉 /api/actuator/health 는 앱에서 404 다.
+          # 클러스터 안에서 직접 친다(부수적으로 Service DNS 도 검증된다).
+          kubectl -n alimi exec deploy/alimi-frontend -- \
+            wget -q -O - -T 10 http://alimi-api:8080/actuator/health | grep -q '"status":"UP"'
+          echo "  ② api /actuator/health UP"
+
+          # ③ nginx → api 프록시 경로가 실제로 살아 있는지.
+          # `location /api/` 는 모든 /api/* 를 앱으로 넘기므로, 4xx 든 2xx 든
+          # **앱이 응답했다는 뜻**이다. 프록시가 끊겼을 때만 502/503/504/000 이 나온다.
+          code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "http://${ing}/api/notifications/0")"
+          case "$code" in
+            502|503|504|000) echo "::error::nginx → api 프록시 실패 (HTTP $code)"; exit 1 ;;
+            *)               echo "  ③ /api/ 프록시 OK (HTTP $code — 앱이 응답)" ;;
+          esac
+
+          echo "스모크 통과"
 
       # 롤아웃이나 스모크가 실패하면 직전 ReplicaSet 으로 되돌린다.
       # 이전 SHA 이미지는 prune 스크립트가 KEEP 개까지 보존하므로 노드에 남아 있다.
@@ -298,13 +377,21 @@ jobs:
         if: failure()
         run: |
           for d in alimi-api alimi-frontend alimi-scheduler alimi-notifier alimi-checker; do
-            kubectl -n alimi rollout undo "deploy/$d" || true
+            # 아직 만들어진 적 없는 Deployment 에 undo 를 때리면 에러만 쌓여
+            # 진짜 실패 원인이 로그에 묻힌다.
+            kubectl -n alimi get "deploy/$d" >/dev/null 2>&1 || continue
+            # 되돌아갈 리비전이 1개뿐이면(첫 배포) undo 는 의미가 없다.
+            revs=$(kubectl -n alimi rollout history "deploy/$d" 2>/dev/null | grep -c '^[0-9]' || echo 0)
+            [ "$revs" -ge 2 ] && kubectl -n alimi rollout undo "deploy/$d" || echo "  $d: 되돌릴 이전 리비전 없음"
           done
           kubectl -n alimi get pods -o wide
           echo "::error::배포 실패 — 직전 버전으로 되돌렸다. 스키마는 되돌아가지 않는다(Flyway 에 down 이 없다)."
 
       - name: 이미지 정리
         if: always() && steps.tag.outputs.mode == 'deploy'
+        env:
+          # 디스크가 이미 75% 다(29G 중 21G). 롤백 여지를 남기되 보수적으로 잡는다.
+          KEEP: '3'
         run: ./scripts/prune-images.sh "${{ steps.tag.outputs.value }}"
 
       - name: 작업 파일 삭제
