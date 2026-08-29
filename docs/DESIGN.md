@@ -941,6 +941,82 @@ base 매니페스트의 메모리 request 합은 **3,264Mi** 인데 파이4 4GB 
   재입고 알림 도메인에서 그건 "알림 한 건 늦음"이고 카드 수명과 바꿀 만하다).
   이건 완화책이지 해결책이 아니다. **USB SSD 부팅을 권한다.**
 
+### 12.11 첫 배포에서 실제로 걸린 것 (2026-08-29, 파이4 + k3s)
+
+CD 를 처음 돌리는 데 실패 다섯 번이 걸렸다. 전부 **첫 실행에서만, 또는 실제 하드웨어에서만**
+드러나는 종류였고, 로컬 `kustomize build` 나 이미지 빌드 검증으로는 하나도 잡히지 않았다.
+
+**① artifact 는 빈 디렉터리를 옮기지 않는다.**
+`layertools extract` 는 SNAPSHOT 의존성이 없어도 `snapshot-dependencies/` 를 만든다.
+그런데 `actions/upload-artifact` 는 파일 목록 기반이라 빈 디렉터리를 대표할 항목이 없다.
+내용이 있는 `dependencies/` 는 살아남고 그것만 사라져 `COPY` 가 not found 로 죽었다.
+→ `dist` 를 tar 로 묶어 전송한다.
+
+**② 이름이 고정된 Job 은 apply 로 갱신되지 않는다 — 그리고 삭제 순서가 중요하다.**
+`spec.template` 이 immutable 이라 이미지 태그가 바뀌면 apply 가 거부된다. 그건 알고
+`delete` 를 넣어뒀지만 **다음 스텝에 뒀다.** 앞 스텝의 apply 가 Job 을 포함하므로
+삭제에 닿기 전에 터진다. 첫 배포에서는 Job 이 없어 통과하고, **두 번째 배포부터** 드러났다.
+
+**③ exec 프로브의 `timeoutSeconds` 기본값은 1초다.**
+Kafka readiness 가 `kafka-broker-api-versions` — JVM 도구였다. 파이4에서 JVM 은 1초 안에
+뜨지 못하므로 이 프로브는 **영원히 실패한다.** 78분간 x478 회 실패했다.
+
+그런데 더 나쁜 건 따로 있었다. 10초마다 limit 640Mi 컨테이너 안에 JVM 을 새로 띄운 결과,
+브로커가 **자기 자신의 컨트롤러**(같은 프로세스)로 보내는 하트비트까지 타임아웃났다:
+
+```
+Fencing broker 1 because its session has timed out
+```
+
+**깨진 프로브는 실패만 한 게 아니라 브로커를 굶기고 있었다.** `tcpSocket` 으로 바꾸면
+프로세스를 안 띄우므로 이 압박도 같이 사라진다.
+
+**④ 그 결과 StatefulSet 이 교착에 빠졌다.**
+
+```
+프로브가 틀림 → 파드가 Ready 안 됨 → StatefulSet 이 롤링 업데이트를 진행하지 않음
+            → 프로브 수정이 영원히 적용 안 됨
+```
+
+**StatefulSet 은 파드가 Ready 가 아니면 업데이트하지 않는다.** 즉 "Ready 를 막고 있는
+그 버그"는 자기 수정을 스스로 차단한다. 쿠버네티스 문서의 *forced rollback* 이 다루는
+상황이고, 해법은 파드를 직접 지우는 것뿐이다.
+→ CD 가 파드의 `controller-revision-hash` 와 StatefulSet 의 `updateRevision` 을 비교해
+   어긋나면 지운다.
+
+**⑤ Flyway 는 MySQL 8.4 에 그냥은 못 붙는다.**
+
+```
+RSA public key is not available client side (option serverRsaPublicKeyFile not set)
+```
+
+Flyway CLI 는 `jdbc:mysql` 을 **MariaDB 드라이버**로 처리하는데, MySQL 8.4 의 기본 인증
+(`caching_sha2_password`)은 평문 연결에서 서버 RSA 공개키를 받아와야 비밀번호를 보낸다.
+앱(MySQL Connector/J)은 기본으로 SSL 을 협상해 이 문제가 없다 — **그래서 마이그레이션
+Job 에서만 터진다.** → `allowPublicKeyRetrieval=true`.
+
+**⑥ 스모크 테스트 자체가 틀려 있었다** (실행 전에 잡았어야 했다).
+nginx 의 `location /api/` 는 `proxy_pass` 에 경로가 없어 **원본 URI 를 그대로** 넘긴다.
+actuator 는 `/actuator/**` 이고 컨트롤러만 `/api/**` 이므로 `/api/actuator/health` 는
+앱에서 404 다. 앞의 모든 단계가 성공했어도 마지막에서 반드시 실패했을 버그다.
+
+→ 셋으로 나눴다: ① Ingress→frontend, ② 클러스터 안에서 api actuator,
+③ Ingress→`/api/*` 가 앱에 닿는지(`502/503/504/000` 만 실패로 본다 — 4xx 는
+**앱이 응답했다**는 뜻이다).
+
+**교훈.** 실패가 직렬로 배치돼 있었고 한 사이클이 20분이었다. 뒤늦게 남은 단계를 정적으로
+전수 점검하자 ③④⑥이 한 번에 나왔다. **실행으로 발견할 것과 읽어서 발견할 것을 처음부터
+갈랐어야 했다.** 그래서 지금은 실패 시 파드 상태·이벤트·로그·노드 자원을 한 번에 덤프하고,
+앱을 올리기 전에 인프라 Ready 를 게이트로 막는다 — `fail-fast: true`(§12.6 ④) 때문에
+Kafka 가 없으면 앱 4개가 전부 죽는데, 게이트가 없으면 그게 "rollout 600초 타임아웃"이라는
+애매한 형태로만 보인다.
+
+**첫 배포 소요**: 이미지 빌드 약 21분(Playwright 베이스 6.4GB 최초 pull). 이후 배포는
+베이스가 캐시돼 훨씬 짧다. `timeout-minutes` 는 첫 배포 기준(90분)으로 잡는다.
+
+`[미검증]` **무중단은 아직 실측하지 않았다.** 합격 기준은 배포 중
+`while true; do curl ...; done` 에 200 만 찍히는 것이다 (`k8s/pi/README.md` §7).
+
 ---
 
 ## 13. 용어
