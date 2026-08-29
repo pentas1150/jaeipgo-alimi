@@ -1,0 +1,11 @@
+{
+  "simpleProductForDetailPage": {
+    "id": 13614118308,
+    "productStatusType": "SALE",
+    "optionUsable": false,
+    "name": "재고 있는 상품",
+    "enableCart": true,
+    "displayable": true,
+    "channelProductDisplayStatusType": "ON"
+  }
+}

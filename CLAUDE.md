@@ -16,6 +16,8 @@
    한 파티션에 다 몰아넣어 **오토스케일이 통째로 무력화된다.** (실측: §12.6 ③⑥)
 5. **모든 컨슈머는 멱등해야 한다.** Kafka는 at-least-once다. 발송은 `notification_log.idempotency_key` UNIQUE로 물리 차단한다.
 6. **`BrowserContext`는 반드시 close한다.** 안 닫으면 메모리가 샌다.
+   그리고 **Playwright 는 스레드 안전하지 않다** — `@KafkaListener(concurrency=N)` 로 올리지 말고
+   파드당 브라우저 1개를 유지한 채 KEDA 가 파드 수로 올리게 둔다. (§6.2)
 7. **도메인은 Kafka를 모른다.** 발행은 `@TransactionalEventListener(AFTER_COMMIT)`를 거친다 (dual-write 방지).
 8. **알림 발송은 `NotificationSender` 포트로만 한다.** 호출하는 쪽이 채널을 알면 안 된다.
    채널 추가 = 구현체 1개 추가. `Registry`/`Listener` 는 수정하지 않는다. (§11)
@@ -69,10 +71,13 @@ JPA `ddl-auto=validate` 이므로 엔티티와 스키마가 어긋나면 기동�
 구현된 것:
 - **알림 발송 추상화** (`app-notifier/send/`) — 포트 + 이메일/로그 어댑터 + 재시도 정책. 테스트 10개
 - `notification_log` 멱등성 (V2 마이그레이션)
+- **재고 판정** (`app-checker/check/`) — 판정을 순수 함수로 분리 + Playwright 로더. 테스트 16개
 
 아직 없는 것:
 - `Topics.kt` 의 실제 토픽들은 **생성만 되고 프로듀서/컨슈머가 없다**
-- `app-checker` 에 Playwright 의존성은 있으나 **판정 코드가 없다** (셀렉터 미확정)
+- `app-checker` 는 판정만 하고 **Kafka 에 붙어있지 않다** (다음 단계)
+- **네이버 차단이 미해결이다.** 쿠키 워밍업으로 200을 받았지만 상태 객체가 없는 경우를 봤고,
+  차단이 고정이 아니라 속도 제한이라 재현이 들쭉날쭉하다. 상세는 DESIGN §7.1
 - `notification.dispatch.v1` 은 **컨슈머만 있고 프로듀서가 없다** (팬아웃 미구현)
 - 이메일은 기본이 `log` 어댑터다. 실제 발송하려면 `alimi.notification.email.transport=smtp`
 - Spring Batch (`spring-boot-starter-batch`) 미추가 — 메타데이터 테이블 마이그레이션과 함께 도입
@@ -83,6 +88,10 @@ JPA `ddl-auto=validate` 이므로 엔티티와 스키마가 어긋나면 기동�
 ./gradlew build                        # 전 모듈 컴파일 + 테스트
 ./gradlew test                         # 테스트 (Docker 필요 — Testcontainers)
 ./gradlew :backend:app-api:bootRun     # 특정 앱만 실행
+
+# 재고 판정을 실제 스마트스토어에 대고 확인 (개발 PC 에서만 — CI 에서는 반드시 차단당한다)
+./gradlew :backend:app-checker:test -Pexternal
+./gradlew :backend:app-checker:test -Pexternal -Pheaded   # 헤드리스 감지 여부를 가를 때
 docker compose up -d                   # 인프라만 (mysql + kafka)
 docker compose --profile app up --build # 전체 스택
 ```
