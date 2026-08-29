@@ -86,13 +86,20 @@ jobs:
           mkdir -p dist/frontend
           cp -r frontend/dist/. dist/frontend/
 
+      # ⚠️ tar 로 묶어서 올린다. actions/upload-artifact 는 **빈 디렉터리를 담지 않는데**,
+      # layertools 가 만드는 snapshot-dependencies/ 는 SNAPSHOT 의존성이 없으면 비어 있다.
+      # 그대로 올리면 파이에서 그 디렉터리만 사라져 COPY 가 "not found" 로 죽는다.
+      # 부수 효과로 수천 개 작은 jar 를 파일 단위로 전송하지 않게 되어 왕복이 빨라진다.
+      - name: 산출물 묶기
+        run: tar -czf dist.tar.gz -C dist .
+
       - uses: actions/upload-artifact@v4
         with:
           name: dist
-          path: dist/
+          path: dist.tar.gz
           retention-days: 3
-          # 이미 압축된 산출물이라 재압축은 시간만 쓴다.
-          compression-level: 1
+          # 이미 gzip 이다. 다시 압축해봐야 시간만 쓴다.
+          compression-level: 0
 
       - if: failure()
         uses: actions/upload-artifact@v4
@@ -168,7 +175,22 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: dist
-          path: dist/
+
+      - name: 산출물 펼치기
+        if: steps.tag.outputs.mode == 'deploy'
+        run: |
+          mkdir -p dist
+          tar -xzf dist.tar.gz -C dist
+          rm -f dist.tar.gz
+          # 네 모듈 모두 레이어 4종이 있어야 한다. 없으면 여기서 잡는다.
+          for m in app-api app-scheduler app-checker app-notifier; do
+            for l in dependencies spring-boot-loader snapshot-dependencies application; do
+              [ -d "dist/extracted/$m/$l" ] \
+                || { echo "::error::dist/extracted/$m/$l 이 없다"; exit 1; }
+            done
+          done
+          [ -f dist/frontend/index.html ] || { echo "::error::dist/frontend 가 비었다"; exit 1; }
+          echo "산출물 확인 완료"
 
       # secret.env 는 리포지토리에 없다. 배포 때만 만들고 끝나면 지운다.
       - name: Secret 파일 생성
@@ -272,4 +294,4 @@ jobs:
         if: always()
         run: |
           shred -u k8s/base/secret.env 2>/dev/null || rm -f k8s/base/secret.env
-          rm -rf dist /tmp/alimi-rendered.yaml
+          rm -rf dist dist.tar.gz /tmp/alimi-rendered.yaml
