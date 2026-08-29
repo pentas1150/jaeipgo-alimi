@@ -505,7 +505,7 @@ SEO가 실제로 필요해지면 그때 Next.js로 승격한다. 그 전환은 �
 
 ### 10.4 마이그레이션은 별도 Job
 
-`[결정]` **앱에서 Flyway를 끄고(`application-k8s.yml`), `k8s/migration-job.yaml` 이 소유한다.**
+`[결정]` **앱에서 Flyway를 끄고(`application-k8s.yml`), `k8s/base/migration-job.yaml` 이 소유한다.**
 
 끄기 전에는 **버그가 있었다**: `spring.flyway.enabled: true` 가 전역이라 4개 역할이
 전부 기동 시 마이그레이션을 시도했고, api는 `replicas: 2` 라 둘이 동시에 붙었다.
@@ -818,15 +818,128 @@ CrashLoopBackOff에 빠졌다. Kafka가 Ready된 뒤 자동 회복됐다(재시�
 
 ### 12.7 아직 안 한 것
 
-Ingress(현재 NodePort) / Strimzi 오퍼레이터(현재 단일 노드 StatefulSet) /
-Secret 완전 외부화(현재는 로컬 `secret.env` 기반, git 제외) / kustomize overlay / PodDisruptionBudget / Prometheus·Grafana.
+Strimzi 오퍼레이터(현재 단일 노드 StatefulSet) / Secret 완전 외부화(현재는 로컬 `secret.env` 기반, git 제외) /
+PodDisruptionBudget / Prometheus·Grafana / kind 용 overlay 분리.
 상세는 `k8s/README.md` 하단.
+
+Ingress 와 kustomize overlay 는 §12.9~12.10 에서 라즈베리파이 배포를 하며 해결됐다.
+
 
 ### 12.8 컨슈머 readiness의 한계 `[미결정]`
 
 현재 모든 역할이 `spring-boot-starter-web` 때문에 Tomcat을 띄우고, 프로브는 actuator를 쓴다.
 그런데 **Spring Boot의 readiness는 "Kafka 리스너가 실제로 파티션을 할당받았는가"를 보지 않는다.**
 브로커 연결이 끊겨도 readiness는 UP일 수 있다. 정확히 하려면 커스텀 `HealthIndicator`가 필요하다.
+
+### 12.9 CD — `main` 푸시 → 라즈베리파이4 무중단 배포 `[결정]`
+
+`.github/workflows/cd.yml`. 대상은 파이4 4GB(arm64, Ubuntu 26.04, microSD) 위의 **k3s** 단일 노드다.
+런북은 `k8s/pi/README.md`.
+
+**① 아키텍처는 문제가 아니었다.** 쓰는 베이스 이미지가 전부 `linux/arm64` 매니페스트를 게시한다
+(`mcr.microsoft.com/playwright/java:v1.62.0-jammy` 포함 — `docker manifest inspect` 로 확인).
+checker 의 arm64 Chromium 도 공식 이미지가 해결하므로 Dockerfile 의 베이스를 바꾸지 않았다.
+**제약은 아키텍처가 아니라 메모리였다** (§12.10).
+
+**② 빌드를 두 러너로 쪼갰다.** 파이에서 Kotlin 6모듈을 컴파일하면 MySQL/Kafka/JVM 4개와
+같은 4GB 를 다툰다. jar 는 아키텍처 무관이므로 **컴파일은 호스티드 러너**가 하고
+(`bootJar` → `layertools extract` → artifact), **파이는 COPY 뿐인 얇은 이미지 조립**만 한다.
+Dockerfile 은 나누지 않고 `ARG LAYERS_FROM=build|prebuilt` 로 산출물 출처만 고른다 —
+기본값이 기존 동작이라 compose 와 kind 경로는 그대로다.
+
+**③ 레지스트리를 두지 않는다.** buildkitd 를 k3s 의 containerd(`k8s.io` 네임스페이스)에 워커로
+물려 **빌드 결과가 kubelet 이 보는 곳에 바로 생기게** 했다. `docker save`(checker 는 6.4GB tar)
+→ `ctr import` 왕복을 없애는 것이 microSD 에서는 성능이 아니라 **수명** 문제다.
+
+**④ 이미지는 커밋 SHA 로 태깅한다.** `kustomize edit set image` 로 오버레이의 태그를 갈아끼우면
+Deployment spec 이 바뀌어 롤링이 자연히 트리거되고, `rollout undo` 가 이전 SHA 이미지로 정확히
+되돌아간다. 대신 **프루닝을 조심해야 한다** — `crictl rmi --prune` 은 직전 배포 이미지까지
+지워서 롤백을 `ErrImagePull` 로 만든다. 그래서 `scripts/prune-images.sh` 는 배포 순서를
+노드의 원장 파일에 적고 최근 5개만 보존한다.
+
+**⑤ 배포는 2단계다.**
+
+```
+1단계  kubectl apply -l alimi.stage=infra   (ns/config/secret/priorityclass/mysql/kafka/Job)
+       → 마이그레이션 Job 완료 대기
+2단계  kubectl apply (전체)                  → rollout status → 스모크
+```
+
+순서를 강제하지 않으면 새 파드가 `ddl-auto=validate` 로 CrashLoop 하다
+`progressDeadlineSeconds`(600s)에 걸려 배포가 실패로 뒤집힌다. `maxUnavailable: 0` 덕에
+서비스는 안 끊기지만 파이프라인은 빨갛게 된다. 그래서 base 매니페스트에 `alimi.stage: infra`
+라벨을 달아 apply 를 갈랐다. (Job 은 이름이 고정이라 spec 이 바뀌면 apply 로 갱신되지 않는다 —
+지우고 다시 만든다.)
+
+**여기서 규칙 하나가 따라온다:** 마이그레이션이 **구버전 파드가 살아있는 상태에서** 끝나므로
+모든 마이그레이션은 직전 버전 앱과 호환되어야 한다. 컬럼 추가는 되고 DROP/RENAME 은 배포를
+두 번으로 나눠야 한다. Flyway 에 down 은 없으니 스키마 롤백은 자동화 대상이 아니다.
+
+**⑥ 무중단을 만드는 것은 replicas 수가 아니다.** 4GB 라 api 는 1대다. 그래도 무중단인 이유는
+`maxUnavailable: 0` + `maxSurge: 1`(새 파드가 Ready 가 된 뒤에야 옛 파드가 내려간다),
+`preStop: sleep 5`, `server.shutdown: graceful` 세 가지다.
+
+`preStop` 이 핵심이다. **파드가 Terminating 이 되는 것과 kube-proxy 가 엔드포인트를 빼는 것은
+비동기다.** 그 대기가 없으면 이미 죽은 파드로 라우팅된 요청이 502 로 떨어진다.
+합격 기준은 명확하다 — 배포 중 `while true; do curl ...; done` 에 **200 만 찍혀야 한다.**
+
+그 과정에서 base 의 버그도 하나 잡았다: api 의 `terminationGracePeriodSeconds` 가 40s 인데
+`spring.lifecycle.timeout-per-shutdown-phase` 는 60s 였다. §12.4 의 순서 규칙
+(`처리시간 < lifecycle < grace`)이 api 에서만 뒤집혀 있었다. 오버레이에서 75s 로 고쳤다.
+
+반대로 **checker/notifier/scheduler 는 `Recreate` 다.** 4GB 에 서지 파드를 만들 여유가 없고,
+Kafka 컨슈머의 몇 초 공백은 사용자에게 안 보이며 랙으로만 남는다. **무중단이 필요한 것은
+사용자 트래픽을 받는 api 와 frontend 뿐이다.**
+
+**⑦ self-hosted 러너에 `pull_request` 트리거를 붙이지 않는다.** 포크가 보낸 코드가 집 안
+네트워크의 파이에서 실행된다. `push: main` 과 수동 실행뿐이다.
+
+### 12.10 파이4 4GB 자원 예산 — §12.6 ②가 실제 하드웨어에서
+
+§12.6 ②는 랩탑 kind 에서 "**노드 메모리는 파티션 수와 독립된 두 번째 상한**"임을 관측했다
+(파티션 12, 실질 5). 실제 하드웨어에서는 같은 이야기가 훨씬 강하게 나온다: **파이4 4GB 의
+실질 상한은 checker 1대다.**
+
+base 매니페스트의 메모리 request 합은 **3,264Mi** 인데 파이4 4GB 의 `MemTotal` 은 약 3,780Mi 다.
+그런데 진짜 함정은 그게 아니라 이것이다:
+
+> **k3s 서버 프로세스(apiserver/controller/scheduler/containerd/kubelet)는 파드가 아니라서
+> 스케줄러 눈에 안 보인다.** `system-reserved` 를 잡지 않으면 스케줄러는 3.7GiB 가 비었다고
+> 믿고 배치한 뒤 노드째 OOM 난다. 파드가 죽는 게 아니라 **노드가 굳는다.**
+
+그래서 k3s 를 `--kubelet-arg=system-reserved=cpu=300m,memory=1Gi` 와
+`eviction-hard=memory.available<150Mi` 로 설치한다 ⇒ **allocatable ≈ 2,600Mi**.
+
+`k8s/overlays/pi` 의 배분 (스케줄러가 보는 것은 실사용량이 아니라 **request 합**이다):
+
+| | mysql | kafka | api | scheduler | notifier | checker | frontend | 합 |
+|---|---|---|---|---|---|---|---|---|
+| request | 384 | 448 | 288 | 256 | 256 | 512 | 24 | **2,168Mi** |
+| limit | 512 | 640 | 448 | 384 | 384 | 832 | 64 | 3,264Mi |
+
++ k3s 시스템 파드 request 약 70Mi(coredns; traefik·local-path 는 request 미설정)
+⇒ 평시 **2,238Mi**, api 롤링 서지(+288Mi) 시 최대 **2,456Mi**. 2,600Mi 안에 들어간다.
+
+**여유가 약 140Mi 다.** 그래서 서지를 만드는 역할을 둘로 제한했다(§12.9 ⑥).
+
+곁들여 확인한 것들:
+
+- **`request` 를 낮춰 적어서 맞추면 안 된다.** 스케줄러만 낙관적이 되고 노드는 그대로 터진다.
+  실사용 스파이크는 `limit` 과 zram swap 이 받는다.
+- **`emptyDir { medium: Memory }` 는 컨테이너 메모리 limit 에 포함된다.** checker 의 `/dev/shm`
+  을 base 의 1Gi 로 두면 4GB 노드에서 위험하다 — 256Mi 로 낮췄다. 체크는 항상 1건씩(§6.2)이라
+  탭이 하나뿐이므로 충분하다.
+- **`cgroup_enable=memory` 가 없으면 메모리 limit 이 조용히 무시된다.** 라즈베리파이 특유의
+  함정이다. OOMKill 이 안 나서 증상이 "노드가 가끔 멈춤"으로만 보인다.
+- **KEDA 를 파이에 올리지 않는다.** 오퍼레이터+메트릭서버+웹훅이 약 300Mi 인데, 그 300Mi 를
+  써서 늘릴 수 있는 checker 가 0대다. §12.3~12.6 의 KEDA 실측은 kind 환경에 남겨 뒀다.
+- **파티션을 12/6/6 → 3/2/2 로 줄였다.** 동시성 상한 = `min(파티션, 노드 자원)` 인데 파이에서는
+  노드 자원이 1이다. 파티션만 많으면 microSD 에 로그 디렉터리를 12개 만들어 쓰기만 늘린다.
+  ⚠️ 파티션은 늘릴 수만 있고 줄일 수 없으므로(§5), 새 클러스터를 만드는 시점이 유일한 기회다.
+- **microSD 가 가장 약한 고리다.** Kafka 보존 24h·세그먼트 64MB, MySQL
+  `innodb-flush-log-at-trx-commit=2`(커밋마다 fsync 안 함 — 최악의 경우 마지막 1초를 잃는데,
+  재입고 알림 도메인에서 그건 "알림 한 건 늦음"이고 카드 수명과 바꿀 만하다).
+  이건 완화책이지 해결책이 아니다. **USB SSD 부팅을 권한다.**
 
 ---
 

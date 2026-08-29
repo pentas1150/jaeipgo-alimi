@@ -1,0 +1,29 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mysql
+  namespace: alimi
+spec:
+  template:
+    spec:
+      containers:
+        - name: mysql
+          # args 는 원자적으로 대체된다. base 의 두 줄을 반드시 다시 적을 것.
+          args:
+            - --character-set-server=utf8mb4
+            - --collation-server=utf8mb4_unicode_ci
+            # 기본값(128M)에 맞춰 컨테이너 limit 을 잡으면 곧바로 OOMKill 된다.
+            - --innodb-buffer-pool-size=96M
+            # 계측용이고 수십 MB 를 상주로 먹는다. 4GB 에서는 사치다.
+            - --performance-schema=OFF
+            # microSD 보호: 커밋마다 fsync 하지 않는다.
+            # 최악의 경우 마지막 1초를 잃는데, 재입고 알림 도메인에서는
+            # 그 손실이 "알림 한 건 늦음"이고 SD 카드 수명과 바꿀 만하다.
+            - --innodb-flush-log-at-trx-commit=2
+            - --max-connections=60
+          resources:
+            requests:
+              memory: 384Mi
+              cpu: 200m
+            limits:
+              memory: 512Mi

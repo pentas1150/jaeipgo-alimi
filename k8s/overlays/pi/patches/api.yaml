@@ -1,0 +1,36 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: alimi-api
+  namespace: alimi
+spec:
+  # 4GB 에서 2개는 못 띄운다. 무중단은 replicas 수가 아니라
+  # maxUnavailable:0 + maxSurge:1 (base 그대로)이 만든다 —
+  # 새 파드가 Ready 가 된 뒤에야 옛 파드가 내려간다.
+  replicas: 1
+  template:
+    spec:
+      # ⚠️ base 는 40s 인데 application.yml 의
+      # spring.lifecycle.timeout-per-shutdown-phase 가 60s 다. 즉 base 에서는
+      # graceful shutdown 이 끝나기 전에 SIGKILL 이 날아갈 수 있었다
+      # (DESIGN §12.4 의 "처리시간 < lifecycle < grace" 순서가 api 에서만 뒤집혀 있었다).
+      # preStop 5s + lifecycle 60s + 여유 10s = 75s.
+      terminationGracePeriodSeconds: 75
+      containers:
+        - name: app
+          lifecycle:
+            preStop:
+              exec:
+                # 파드가 Terminating 이 되는 것과 kube-proxy 가 엔드포인트를 빼는 것은
+                # 비동기다. 이 5초가 없으면 이미 죽은 파드로 가는 요청이 502 로 떨어진다.
+                # replicas=1 + 서지 구조에서는 이게 무중단을 깨는 유일한 실질 경로다.
+                command: ["sh", "-c", "sleep 5"]
+          env:
+            - name: JAVA_OPTS
+              value: "-XX:MaxRAMPercentage=70.0 -XX:+UseSerialGC -Xss512k"
+          resources:
+            requests:
+              memory: 288Mi
+              cpu: 100m
+            limits:
+              memory: 448Mi

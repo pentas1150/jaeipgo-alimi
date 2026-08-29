@@ -15,6 +15,10 @@ secretGenerator:
     namespace: alimi
     envs:
       - secret.env
+    # 앱보다 먼저 적용돼야 한다 (mysql/migration 이 이 Secret 을 읽는다).
+    options:
+      labels:
+        alimi.stage: infra
 
 resources:
   - namespace.yaml

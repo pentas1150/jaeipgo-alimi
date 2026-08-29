@@ -3,6 +3,19 @@
 설계 배경은 [../docs/DESIGN.md §12](../docs/DESIGN.md) 참고.
 여기는 **실행 절차**만 다룬다.
 
+## 디렉터리
+
+```
+k8s/base/       공통 매니페스트. kind 는 이걸 그대로 쓴다 (`kubectl apply -k k8s/base/`)
+k8s/overlays/pi/  라즈베리파이4(4GB, k3s) 오버레이 — 자원 재배분 + Ingress + 무중단 보강
+k8s/keda/       KEDA ScaledObject. CRD 가 먼저 설치돼야 하므로 base 에 넣지 않았다
+k8s/pi/         라즈베리파이 부트스트랩 + CD 런북
+k8s/kind-cluster.yaml
+```
+
+**이 문서는 kind 환경(학습용 KEDA 실험)을 다룬다.**
+라즈베리파이 자동 배포는 → **[pi/README.md](pi/README.md)**
+
 ## 0. 선행 조건
 
 ```bash
@@ -12,7 +25,7 @@ brew install kind helm     # kubectl 은 이미 설치돼 있음
 **Secret 준비** — 리포지토리에 없으므로 직접 만들어야 한다:
 
 ```bash
-cp k8s/secret.env.example k8s/secret.env
+cp k8s/base/secret.env.example k8s/base/secret.env
 # 필요하면 값을 수정한다. 이 파일은 .gitignore 되어 있다.
 ```
 
@@ -77,7 +90,7 @@ kubectl -n keda rollout status deploy/keda-operator --timeout=180s
 ## 4. 애플리케이션 배포
 
 ```bash
-kubectl apply -k k8s/
+kubectl apply -k k8s/base/
 
 # 인프라가 먼저 떠야 앱이 산다
 kubectl -n alimi rollout status statefulset/mysql --timeout=300s
@@ -208,7 +221,7 @@ kind delete cluster --name alimi
 
 | 증상 | 원인 | 해결 |
 |------|------|------|
-| `secret.env: no such file` | Secret 파일을 안 만듦 | `cp k8s/secret.env.example k8s/secret.env` |
+| `secret.env: no such file` | Secret 파일을 안 만듦 | `cp k8s/base/secret.env.example k8s/base/secret.env` |
 | `ErrImagePull` / `ImagePullBackOff` | kind 노드에 이미지가 없음 | 2번의 `kind load` 재실행 |
 | checker 파드가 `OOMKilled` | 브라우저가 메모리 한도 초과 | `checker.yaml` 의 `limits.memory` 상향 |
 | Chromium 이 랜덤 크래시 | `/dev/shm` 부족 | `dshm` 볼륨이 마운트됐는지 확인 |
@@ -223,10 +236,10 @@ kind delete cluster --name alimi
 
 ## 아직 안 한 것 (다음 단계)
 
-- **Ingress** — 지금은 NodePort. 실전은 ingress-nginx + Ingress 리소스
+- **Ingress (kind 한정)** — kind 에서는 아직 NodePort 다. 파이 오버레이에서는 k3s 내장 Traefik + Ingress 로 이미 해결했다 (`overlays/pi/ingress.yaml`)
 - **Strimzi** — 지금 Kafka 는 단일 노드 StatefulSet. 운영급은 Strimzi 오퍼레이터로 (`KafkaTopic` CR 로 토픽도 선언적 관리)
 - **Secret 관리** — 지금은 로컬 `secret.env`(git 제외) 기반이다. 여러 사람이 쓰거나 실제 자격증명이 생기면 Sealed Secrets / External Secrets Operator / SOPS 로 이전
-- **kustomize overlay** — 지금은 base 뿐. `overlays/local`, `overlays/prod` 로 분리
+- **kustomize overlay** — `overlays/pi` 가 생겼다. kind 도 `overlays/kind` 로 분리하면 base 가 진짜 공통이 된다 (지금 base 의 NodePort 30080 과 replicas 는 사실 kind 전용 값이다)
 - **PodDisruptionBudget** — 노드 드레인 시 checker 가 한꺼번에 죽지 않도록
 - **ShedLock** — scheduler 단일 실행을 `Recreate` 전략이 아니라 애플리케이션 레벨에서 보장
 - **관측** — Prometheus + Grafana. 앱은 이미 `/actuator/prometheus` 를 노출 중

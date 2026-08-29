@@ -21,6 +21,9 @@
    채널 추가 = 구현체 1개 추가. `Registry`/`Listener` 는 수정하지 않는다. (§11)
 9. **발송 실패는 재시도 가능 여부를 구분해 던진다** — `TransientSendException` / `PermanentSendException`.
    영구 실패를 재시도하면 뒤에 쌓인 정상 메시지가 밀린다.
+10. **마이그레이션은 직전 버전 앱과 호환되어야 한다.** CD 는 마이그레이션 Job 을 끝낸 뒤 앱을
+   롤링한다 — 즉 **구버전 파드가 새 스키마 위에서 잠시 돈다.** 컬럼 추가는 되지만
+   DROP/RENAME 은 두 번의 배포로 나눠야 한다. Flyway 에 down 은 없다. (§12.9)
 
 ## 모듈 구조
 
@@ -49,17 +52,27 @@ frontend/             Vite → 정적 빌드 → nginx (배포에 Node 런타임
 `backend/core/src/main/resources/db/migration/V{n}__*.sql` 에 추가한다.
 JPA `ddl-auto=validate` 이므로 엔티티와 스키마가 어긋나면 기동에 실패한다.
 
-**k8s에서는 앱이 Flyway를 돌리지 않는다** — `k8s/migration-job.yaml` 이 소유한다 (§10.4).
+**k8s에서는 앱이 Flyway를 돌리지 않는다** — `k8s/base/migration-job.yaml` 이 소유한다 (§10.4).
 로컬(`local`/`docker`)에서는 앱이 직접 돌린다.
+배포 시에는 CD 가 이 Job 을 **앱보다 먼저** 완료시킨다. 그래서 위 규칙 10이 따라온다.
 
 ## 배포
 
-로컬 k8s (kind + KEDA + 마이그레이션 Job). 절차는 [k8s/README.md](k8s/README.md), 배경은 §12.
+```
+k8s/base/         공통 매니페스트
+k8s/overlays/pi/  라즈베리파이4(4GB, k3s) — CD 가 배포하는 실제 환경
+k8s/keda/         KEDA ScaledObject (kind 전용. 파이에는 안 올린다)
+```
 
-**Secret 은 리포지토리에 없다.** `k8s/secret.env`(git 제외)를 만들어야 배포된다 —
-`cp k8s/secret.env.example k8s/secret.env`. 자격증명을 매니페스트에 직접 쓰지 않는다.
+- **kind (학습/실험)**: `kubectl apply -k k8s/base/` — 절차는 [k8s/README.md](k8s/README.md), 배경은 §12
+- **라즈베리파이 (자동)**: `main` 푸시 → `.github/workflows/cd.yml` — 런북은 [k8s/pi/README.md](k8s/pi/README.md), 배경은 §12.9~12.10
+
+**Secret 은 리포지토리에 없다.** `k8s/base/secret.env`(git 제외)를 만들어야 배포된다 —
+`cp k8s/base/secret.env.example k8s/base/secret.env`. 자격증명을 매니페스트에 직접 쓰지 않는다.
+CD 는 GitHub Secret `ALIMI_SECRET_ENV` 를 배포 시점에만 이 파일로 풀었다 지운다.
 
 **Kafka 컨슈머 파드는 파티션 수를 넘겨 늘려봐야 논다.** `maxReplicaCount ≤ 파티션 수`를 지킨다.
+단 실제 상한은 `min(파티션 수, 노드 자원)` 이다 — 파이4 4GB 에서는 노드 자원이 이긴다 (§12.10).
 
 ## 현재 상태
 

@@ -1,0 +1,30 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: kafka
+  namespace: alimi
+spec:
+  template:
+    spec:
+      containers:
+        - name: kafka
+          env:
+            - name: KAFKA_HEAP_OPTS
+              value: "-Xms192M -Xmx320M"
+            # microSD 보호. 이 서비스는 이벤트를 재생할 일이 없고,
+            # 보존 기간을 길게 잡을수록 카드 쓰기만 늘어난다.
+            - name: KAFKA_LOG_RETENTION_HOURS
+              value: "24"
+            - name: KAFKA_LOG_SEGMENT_BYTES
+              value: "67108864"          # 64MB (기본 1GB)
+            - name: KAFKA_LOG_RETENTION_BYTES
+              value: "134217728"         # 파티션당 128MB 상한
+            # 자동 생성되는 토픽까지 파티션이 불어나지 않게 한다.
+            - name: KAFKA_NUM_PARTITIONS
+              value: "1"
+          resources:
+            requests:
+              memory: 448Mi
+              cpu: 250m
+            limits:
+              memory: 640Mi

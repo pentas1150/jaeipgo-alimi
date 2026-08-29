@@ -1,0 +1,33 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: alimi-checker
+  namespace: alimi
+spec:
+  # KEDA 없이 1대 고정. 파티션이 3개라도 4GB 에는 워커 1대만 들어간다.
+  # (DESIGN §12.6 ② 가 랩탑에서 관측한 "파티션 수와 독립된 노드 메모리 상한"이
+  #  파이에서는 훨씬 낮은 값으로 나타난 것이다.)
+  replicas: 1
+  template:
+    spec:
+      containers:
+        - name: app
+          env:
+            # 컨테이너 메모리의 상당 부분을 Chromium 이 쓴다. base 는 45%,
+            # 파이에서는 limit 자체가 작으므로 더 낮춘다.
+            - name: JAVA_OPTS
+              value: "-XX:MaxRAMPercentage=35.0 -XX:+UseSerialGC -Xss512k"
+          resources:
+            requests:
+              memory: 512Mi
+              cpu: 250m
+            limits:
+              memory: 832Mi
+      volumes:
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            # ⚠️ medium:Memory 인 emptyDir 은 노드 RAM 을 쓰고 컨테이너 메모리
+            # limit 에 포함된다. base 의 1Gi 는 4GB 노드에서 그대로 두면 위험하다.
+            # 탭 1개(체크는 항상 1건씩)에는 256Mi 로 충분하다.
+            sizeLimit: 256Mi
