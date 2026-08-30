@@ -2,6 +2,7 @@ package com.jaeipgo.alimi.core.product
 
 import java.time.Duration
 import java.time.Instant
+import java.util.concurrent.ThreadLocalRandom
 import kotlin.math.min
 
 /**
@@ -43,9 +44,36 @@ object CheckSchedule {
      */
     val FAILURE_BACKOFF_MAX: Duration = Duration.ofHours(1)
 
+    /**
+     * 차단당했을 때 물러날 기본 시간.
+     *
+     * 실패 백오프와 따로 두는 이유: 차단은 **우리 문제가 아니라 상대 쪽 사정**이고,
+     * 보통 한 상품이 아니라 전 상품에 동시에 걸린다. 실패 카운터로 세면 차단 한 번에
+     * 감시 목록 전체가 SUSPENDED 로 내려간다.
+     */
+    val BLOCKED_BACKOFF: Duration = Duration.ofMinutes(15)
+
+    /**
+     * 차단 백오프에 섞는 지터의 상한.
+     *
+     * 차단은 전 상품에 동시에 걸리므로, 고정 시간만 물러나면 **전부 같은 순간에 돌아온다.**
+     * 그러면 차단이 풀렸는지 확인하러 가는 요청이 한꺼번에 몰려 다시 차단당한다.
+     */
+    val BLOCKED_JITTER: Duration = Duration.ofMinutes(5)
+
     /** 성공적으로 관측한 뒤의 다음 체크 시각. */
     fun afterObservation(now: Instant, checkIntervalSec: Int): Instant =
         now.plusSeconds(checkIntervalSec.toLong())
+
+    /**
+     * 차단당한 뒤의 다음 체크 시각. [BLOCKED_BACKOFF] 에 0~[BLOCKED_JITTER] 를 더한다.
+     *
+     * @param jitterSeconds 테스트에서 고정하기 위해 주입할 수 있다. 기본은 무작위다.
+     */
+    fun afterBlocked(
+        now: Instant,
+        jitterSeconds: Long = ThreadLocalRandom.current().nextLong(BLOCKED_JITTER.seconds + 1),
+    ): Instant = now.plus(BLOCKED_BACKOFF).plusSeconds(jitterSeconds)
 
     /**
      * 판정에 실패한 뒤의 다음 체크 시각.

@@ -1,0 +1,12 @@
+{
+  "simpleProductForDetailPage": {
+    "id": 13112687319,
+    "productStatusType": "OUTOFSTOCK",
+    "stockQuantity": 0,
+    "optionUsable": false,
+    "name": "품절된 상품",
+    "enableCart": true,
+    "displayable": true,
+    "channelProductDisplayStatusType": "ON"
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "product": {
+    "id": null,
+    "productStatusType": null,
+    "stockQuantity": 0,
+    "soldout": false
+  },
+  "simpleProductForDetailPage": {}
+}

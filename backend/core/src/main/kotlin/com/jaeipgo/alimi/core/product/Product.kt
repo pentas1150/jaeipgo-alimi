@@ -158,6 +158,22 @@ class Product(
     }
 
     /**
+     * 네이버가 요청을 거부했다 (차단, 비표준 상태 코드, 상대 서버 오류).
+     *
+     * ⚠️ **[consecutiveFailures] 를 올리지 않는다.** 차단은 우리 셀렉터가 깨진 게 아니라
+     * 상대 쪽 사정이고, 보통 한 상품이 아니라 **전 상품에 동시에** 걸린다. 실패로 세면
+     * 차단 한 번에 감시 목록 전체가 `SUSPENDED` 로 내려간다 — 정작 복구되면 아무도
+     * 감시하고 있지 않은 상태가 된다.
+     *
+     * [lastStatus] 도 그대로 둔다. 판정 실패와 같은 이유다 (§4.1).
+     * 하는 일은 **물러나는 것뿐**이고, 지터를 섞어 전 상품이 같은 순간에 돌아오지 않게 한다.
+     */
+    fun recordBlocked(now: Instant, nextCheckAt: Instant = CheckSchedule.afterBlocked(now)) {
+        lastCheckedAt = now
+        this.nextCheckAt = nextCheckAt
+    }
+
+    /**
      * 상품 페이지가 사라졌다. 되살아날 일이 사실상 없으므로 감시를 영구히 끝낸다.
      *
      * [lastStatus] 는 여기서도 건드리지 않는다 — 마지막으로 관측된 사실은 사실이다.

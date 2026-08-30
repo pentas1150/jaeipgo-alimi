@@ -124,6 +124,18 @@ alimi:
       stock-check-requested: ${ALIMI_PARTITIONS_CHECK:12}
       stock-restocked: ${ALIMI_PARTITIONS_RESTOCKED:6}
       notification-dispatch: ${ALIMI_PARTITIONS_DISPATCH:6}
+  checker:
+    # 헤드리스로 띄울지. 네이버가 헤드리스를 감지하는 것으로 확인되면 false 로 바꾸고
+    # 컨테이너 진입점을 `xvfb-run -a java -jar app.jar` 로 바꾼다 (docs/DESIGN.md §7).
+    headless: ${ALIMI_CHECKER_HEADLESS:true}
+    # ⚠️ spring.lifecycle.timeout-per-shutdown-phase(60s) 보다 작아야 하고,
+    # 그게 다시 k8s terminationGracePeriodSeconds(120s) 보다 작아야 한다.
+    navigation-timeout-ms: 30000
+    # 쿠키 워밍업 URL. 비워두면 상품 URL 에서 스토어 홈을 유도한다(권장).
+    # ⚠️ https://smartstore.naver.com 을 넣지 말 것 — 판매자 센터로 리다이렉트되어
+    # 로그인을 요구하고, 그 쿠키로는 상품 페이지가 전부 로그인 페이지가 된다.
+    warmup-url: ${ALIMI_CHECKER_WARMUP_URL:}
+    rewarm-after-consecutive-blocks: 3
   notification:
     # 알림 본문에 찍히는 시각 기준. 사용자에게 보이는 값이라 KST.
     time-zone: Asia/Seoul

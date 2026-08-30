@@ -80,6 +80,19 @@ class StockObservationService(
         return suspended
     }
 
+    /**
+     * 네이버가 요청을 거부했다. **실패로 세지 않고 물러나기만 한다.**
+     *
+     * 차단은 전 상품에 동시에 걸리므로 실패로 세면 감시 목록 전체가 `SUSPENDED` 로
+     * 내려가고, 정작 차단이 풀렸을 때 아무도 감시하고 있지 않게 된다.
+     */
+    @Transactional
+    fun recordBlocked(productId: Long, now: Instant = Instant.now()) {
+        val product = load(productId)
+        product.recordBlocked(now)
+        log.info("차단당해 물러난다: productId={} 다음 체크={}", productId, product.nextCheckAt)
+    }
+
     /** 상품 페이지가 사라졌다. 되살아나지 않으므로 감시를 영구히 끝낸다. */
     @Transactional
     fun recordNotFound(productId: Long, now: Instant = Instant.now()) {

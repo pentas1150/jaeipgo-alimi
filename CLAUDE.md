@@ -18,6 +18,12 @@
    한 파티션에 다 몰아넣어 **오토스케일이 통째로 무력화된다.** (실측: §12.6 ③⑥)
 5. **모든 컨슈머는 멱등해야 한다.** Kafka는 at-least-once다. 발송은 `notification_log.idempotency_key` UNIQUE로 물리 차단한다.
 6. **`BrowserContext`는 반드시 close한다.** 안 닫으면 메모리가 샌다.
+   그리고 **체커 리스너의 `concurrency` 를 올리지 않는다** — Playwright Java 는 스레드
+   안전하지 않고 브라우저는 파드당 하나다. 동시성은 KEDA 가 파드 수로 올린다.
+   ⚠️ **차단(`BLOCKED`)은 판정 실패(`UNKNOWN`)와 다르게 센다.** 차단은 전 상품에 동시에
+   걸리므로 실패로 세면 감시 목록 전체가 `SUSPENDED` 로 내려간다 (§6.2).
+   그리고 **Playwright 는 스레드 안전하지 않다** — `@KafkaListener(concurrency=N)` 로 올리지 말고
+   파드당 브라우저 1개를 유지한 채 KEDA 가 파드 수로 올리게 둔다. (§6.2)
 7. **도메인은 Kafka를 모른다.** 발행은 `@TransactionalEventListener(AFTER_COMMIT)`를 거친다 (dual-write 방지).
 8. **알림 발송은 `NotificationSender` 포트로만 한다.** 호출하는 쪽이 채널을 알면 안 된다.
    채널 추가 = 구현체 1개 추가. `Registry`/`Listener` 는 수정하지 않는다. (§11)
@@ -88,11 +94,15 @@ CD 는 GitHub Secret `ALIMI_SECRET_ENV` 를 배포 시점에만 이 파일로 �
 - **`Product` 엔티티 + 상태 전이** (V4) — `core/product/`. 재고/감시 2축 분리 (§4.1)
 - **상품 URL 파싱/검증** — `core/product/SmartStoreUrl` + `@SmartStoreUrl` 제약 (§7.2)
 - **체크 요청 파이프라인** — 등록 upsert → AFTER_COMMIT → Redis SETNX 게이트 → Kafka (§7.3)
+- **재고 판정** (`app-checker/check/`) — 판정을 순수 함수로 분리 + Playwright 로더
+- **체커 ↔ Kafka 배선** — 요청 소비 → 판정 → 상태 반영 → `stock.restocked.v1` (§6.3)
 
 아직 없는 것:
-- `stock.check.requested.v1` 은 **프로듀서만 있고 컨슈머가 없다** (체커 판정 코드 대기)
-- `app-checker` 에 Playwright 의존성은 있으나 **판정 코드가 없다** (셀렉터 미확정)
 - `notification.dispatch.v1` 은 **컨슈머만 있고 프로듀서가 없다** (팬아웃 미구현)
+- `Watch`(구독) 엔티티가 없다 — 등록 API 와 팬아웃이 이걸 기다린다
+- **네이버 접근이 미해결이다.** 워밍업 URL 오류(루트 → 판매자 센터 → 로그인 리다이렉트)는
+  잡았지만, 지금은 `490` 을 받는다. 봇 감지인지 속도 제한인지 미확정이다.
+  **간격을 충분히 두고 1회만** 시도해서 확인할 것. 상세와 교훈은 DESIGN §7.1
 - 이메일은 기본이 `log` 어댑터다. 실제 발송하려면 `alimi.notification.email.transport=smtp`
 - Spring Batch (`spring-boot-starter-batch`) 미추가 — 메타데이터 테이블 마이그레이션과 함께 도입
 
@@ -131,6 +141,10 @@ CD 는 GitHub Secret `ALIMI_SECRET_ENV` 를 배포 시점에만 이 파일로 �
 ./gradlew build                        # 전 모듈 컴파일 + 테스트
 ./gradlew test                         # 테스트 (Docker 필요 — Testcontainers)
 ./gradlew :backend:app-api:bootRun     # 특정 앱만 실행
+
+# 재고 판정을 실제 스마트스토어에 대고 확인 (개발 PC 에서만 — CI 에서는 반드시 차단당한다)
+./gradlew :backend:app-checker:test -Pexternal
+./gradlew :backend:app-checker:test -Pexternal -Pheaded   # 헤드리스 감지 여부를 가를 때
 docker compose up -d                   # 인프라만 (mysql + kafka)
 docker compose --profile app up --build # 전체 스택
 ```

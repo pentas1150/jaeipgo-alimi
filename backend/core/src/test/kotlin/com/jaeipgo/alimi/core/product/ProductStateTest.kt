@@ -179,6 +179,55 @@ class ProductStateTest {
     }
 
     @Nested
+    @DisplayName("차단은 실패와 다르게 센다")
+    inner class Blocked {
+
+        @Test
+        fun `실패 카운터를 올리지 않는다`() {
+            // 차단은 우리 셀렉터가 깨진 게 아니라 상대 쪽 사정이고, 보통 전 상품에
+            // 동시에 걸린다. 실패로 세면 차단 한 번에 감시 목록 전체가 SUSPENDED 로
+            // 내려가고, 정작 복구되면 아무도 감시하고 있지 않게 된다.
+            val product = product(status = StockStatus.OUT_OF_STOCK)
+
+            repeat(10) { product.recordBlocked(t0) }
+
+            assertThat(product.consecutiveFailures).isZero()
+            assertThat(product.monitoringStatus).isEqualTo(MonitoringStatus.ACTIVE)
+        }
+
+        @Test
+        fun `관측된 사실도 지우지 않는다`() {
+            val product = product(status = StockStatus.OUT_OF_STOCK)
+
+            product.recordBlocked(t0)
+
+            assertThat(product.lastStatus).isEqualTo(StockStatus.OUT_OF_STOCK)
+        }
+
+        @Test
+        fun `물러나되 지터를 섞는다`() {
+            // 고정 시간만 물러나면 전 상품이 같은 순간에 돌아와 다시 차단당한다.
+            val product = product(status = StockStatus.OUT_OF_STOCK)
+
+            product.recordBlocked(t0)
+
+            val backoff = Duration.between(t0, product.nextCheckAt)
+            assertThat(backoff).isBetween(
+                CheckSchedule.BLOCKED_BACKOFF,
+                CheckSchedule.BLOCKED_BACKOFF.plus(CheckSchedule.BLOCKED_JITTER),
+            )
+        }
+
+        @Test
+        fun `실패 백오프보다 오래 물러난다`() {
+            val blocked = product(status = StockStatus.OUT_OF_STOCK).apply { recordBlocked(t0) }
+            val failed = product(status = StockStatus.OUT_OF_STOCK).apply { recordCheckFailure(t0) }
+
+            assertThat(blocked.nextCheckAt).isAfter(failed.nextCheckAt)
+        }
+    }
+
+    @Nested
     @DisplayName("기준선")
     inner class Baseline {
 
