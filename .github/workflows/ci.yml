@@ -120,7 +120,18 @@ jobs:
       - name: kustomize 렌더 + 스키마 검증
         run: |
           kustomize build k8s/base        | kubeconform -strict -summary -
-          kustomize build k8s/overlays/pi | kubeconform -strict -summary -
+
+          # 파이 오버레이에는 Traefik Middleware(CRD)가 있어 두 번 나눠 검증한다.
+          #   1회차: CRD 를 빼고 strict — 네트워크에 의존하지 않는 진짜 방어선
+          #   2회차: CRD 만 커뮤니티 카탈로그로. 카탈로그를 못 받아도 CI 를 빨간불로
+          #          만들지 않도록 -ignore-missing-schemas 를 둔다 (KEDA 단계와 같은 이유)
+          kustomize build k8s/overlays/pi > /tmp/pi-rendered.yaml
+          kubeconform -strict -summary -skip Middleware /tmp/pi-rendered.yaml
+          kubeconform -strict -summary \
+            -schema-location default \
+            -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
+            -ignore-missing-schemas \
+            /tmp/pi-rendered.yaml
 
       # KEDA ScaledObject 는 CRD 라 kubeconform 에 내장 스키마가 없다.
       # 커뮤니티 CRD 카탈로그를 스키마 출처로 붙이면 필드 오타까지 잡힌다.

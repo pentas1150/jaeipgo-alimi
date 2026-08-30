@@ -1,3 +1,17 @@
+# 입구는 Ingress 두 개다. 하나로 합칠 수 없다 —
+# `traefik.ingress.kubernetes.io/router.middlewares` 애노테이션은 그 Ingress 가 만드는
+# **모든 라우터**에 붙는다. 한 Ingress 에 catch-all 과 host 규칙을 같이 두고 리다이렉트를
+# 걸면 IP 직접 접근까지 https 로 튕겨서, 인증서 SAN 에 IP 가 없으니 브라우저 경고로 끝나고
+# CD 스모크(`http://<ip>/healthz`)도 깨진다.
+
+---
+# ① catch-all — host 를 지정하지 않는다 = 아무 Host 헤더나 받는다.
+#
+# ⚠️ 이 Ingress 를 지우거나 이름(alimi)을 바꾸지 말 것. 두 곳이 의존한다:
+#    - 집 안에서 http://<pi-ip>/ 로 바로 접근
+#    - .github/workflows/cd.yml 스모크가
+#      `kubectl -n alimi get ingress alimi -o jsonpath='{...loadBalancer.ingress[0].ip}'`
+#      로 IP 를 얻어 http 로 붙는다.
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -8,9 +22,6 @@ spec:
   # (kind 환경의 NodePort 30080 은 base 에 남아 있고, 이 오버레이에서만 ClusterIP 로 바뀐다)
   ingressClassName: traefik
   rules:
-    # host 를 지정하지 않는다 = 아무 Host 헤더나 받는다.
-    # 집 안에서 http://<pi-ip>/ 로 바로 접근하기 위한 catch-all 이다.
-    # 도메인을 붙이게 되면 여기에 host 를 추가하면 된다.
     - http:
         paths:
           # 규칙이 하나뿐인 이유: nginx(alimi-frontend)가 이미 /api/ 를
@@ -23,3 +34,49 @@ spec:
                 name: alimi-frontend
                 port:
                   number: 8080
+
+---
+# ② 도메인 + TLS — 구글 OAuth 가 https 리다이렉트 URI 를 요구하기 때문에 필요하다.
+#    사설 IP(192.168.*)와 .local 은 구글 콘솔에 등록조차 되지 않는다.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: alimi-domain
+  namespace: alimi
+  annotations:
+    # http 로 들어오면 https 로 올린다. 세션 쿠키를 Secure 로 굽기 때문에
+    # http 로 접속하면 로그인이 조용히 안 되는 상태가 된다 — 그걸 막는다.
+    traefik.ingress.kubernetes.io/router.middlewares: alimi-redirect-https@kubernetescrd
+spec:
+  ingressClassName: traefik
+  tls:
+    # 인증서는 cert-renew CronJob 이 만드는 alimi-tls Secret 에서 온다.
+    # Secret 이 아직 없어도 Ingress 는 정상 생성된다 — Traefik 이 자기 기본(자체서명)
+    # 인증서로 서빙하다가, Secret 이 생기는 순간 알아서 바꿔 문다.
+    - hosts:
+        - alimi-example.duckdns.org   # ⚠️ 본인 DuckDNS 서브도메인으로 바꿀 것
+      secretName: alimi-tls
+  rules:
+    - host: alimi-example.duckdns.org   # ⚠️ 본인 DuckDNS 서브도메인으로 바꿀 것
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: alimi-frontend
+                port:
+                  number: 8080
+
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: redirect-https
+  namespace: alimi
+spec:
+  redirectScheme:
+    scheme: https
+    # 308 이 아니라 302. 영구 리다이렉트는 브라우저가 캐시해버려서
+    # 도메인/인증서 설정을 바꿀 때 손댈 수 없는 상태가 된다.
+    permanent: false

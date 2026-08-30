@@ -28,10 +28,14 @@ kind: Kustomization
 #
 # ⚠️ request 는 넉넉히 잡는 게 아니라 **실제에 가깝게** 잡아야 한다. 낮춰 적으면
 # 스케줄러만 낙관적이 되고 노드는 그대로 터진다. 실사용 스파이크는 limit + zram 이 받는다.
+#
+# cert-renew CronJob(96Mi)은 위 상시 예산에 넣지 않았다 — 주 1회 몇 분만 뜬다.
+# 대신 스케줄을 04:00 KST 로 잡아 api 롤링 서지(+288Mi)와 겹치지 않게 했다.
 
 resources:
   - ../../base
   - ingress.yaml
+  - cert-renew.yaml
 
 # CD 가 `kustomize edit set image alimi-api=alimi-api:<sha>` 로 이 값을 갈아끼운다.
 # 태그가 바뀌면 Deployment spec 이 바뀌므로 롤링 업데이트가 자연히 트리거되고,
