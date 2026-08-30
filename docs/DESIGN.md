@@ -543,6 +543,87 @@ stock.restocked 수신
 
 ---
 
+### 7.3 체크 요청 파이프라인 — 등록에서 크롤링까지
+
+#### 등록 중복과 크롤링 중복은 다른 문제다
+
+| | 무엇이 막나 | 왜 |
+|---|---|---|
+| 상품 행 중복 | `uk_product_external` (DB) | 동시 등록이면 하나는 제약에 걸리고, 진 쪽은 기존 행을 읽으면 된다. **분산 락이 필요 없다** |
+| 크롤링 중복 | `SETNX check:inflight:{productId}` (Redis) | 상품 행이 하나여도 **체크 요청은 등록 인원수만큼 나간다** |
+
+```
+10명이 동시에 같은 상품 등록
+  → product 행은 1개              (UNIQUE 가 보장)
+  → 그러나 stock.check.requested.v1 이 10번 발행됨
+  → 체커가 같은 페이지를 10번 긁음 → 차단 자초 (§7.1)
+```
+
+Kafka 키(`productId`)는 파티션을 몰아줄 뿐 **중복을 제거하지 않는다.**
+뒤따라온 요청들은 각자 구독을 `PENDING` 으로 만들어두고, **하나의 체크 결과가 그 상품의
+모든 `PENDING` 을 한꺼번에 승격**시킨다. 아무도 손해 보지 않는다.
+
+게이트는 **정확성 장치가 아니라 최적화**다. 그래서 Redis 가 흔들리면 통과시킨다 —
+막아서 생기는 최악(사용자가 등록을 못 함)이 통과시켜서 생기는 최악(중복 크롤링 몇 건)보다
+훨씬 나쁘다.
+
+TTL(60초)만 쓰고 체크 완료 시 키를 지우지 않는 이유: 그러려면 `app-checker` 가 Redis 를
+알아야 하는데, 그러면 actuator 헬스가 Redis 에 묶여서 **redis 가 흔들릴 때 멀쩡한 체커
+파드가 죽는다.** 60초는 등록이 몰리는 순간(사람이 링크를 공유한 직후)을 덮기에 충분하고,
+그 뒤의 재시도는 배치가 `next_check_at` 으로 알아서 한다.
+
+이 게이트가 막지 못하는 것: 배치가 같은 상품을 집어가는 것과는 겹칠 수 있다.
+다만 배치는 `next_check_at` 으로 자연히 중복이 제거되므로 최악이 2건이지 10건이 아니다.
+
+#### 최근 관측이 있으면 다시 긁지 않는다
+
+`Product.needsFreshCheck()` — `last_checked_at` 이 `check_interval_sec` 안쪽이면 새 체크를
+요청하지 않고 기존 상태로 구독을 판정한다. 페이지 요청은 이 서비스에서 가장 귀한 자원이고,
+인기 상품일수록 여러 명이 몰려 등록하므로 **그때마다 긁으면 가장 나쁜 순간에 가장 많이 긁는
+셈**이 된다.
+
+#### ⚠️ 제약 위반 뒤에는 그 트랜잭션을 계속 쓸 수 없다
+
+`ProductRegistrationService` 는 "INSERT 시도" 와 "충돌 후 재조회" 를 **서로 다른
+트랜잭션**으로 가른다. 한 트랜잭션에서 하면 이렇게 터진다:
+
+```
+org.hibernate.AssertionFailure: Entry for instance of 'Product' has a null identifier
+(this can happen if the session is flushed after an exception occurs)
+```
+
+제약 위반이 나면 Hibernate 세션이 오염되고, JPA 명세상으로도 그 트랜잭션은 롤백되어야 한다.
+메서드를 나누는 것만으로는 안 된다 — 같은 빈 안의 호출은 프록시를 타지 않아
+`@Transactional` 이 걸리지 않는다. `TransactionTemplate` 을 명시적으로 쓴다.
+
+(8스레드 동시 등록 테스트가 없었으면 운영에서 처음 드러났을 문제다)
+
+#### 발행은 커밋 뒤에
+
+규칙 7 대로 도메인은 Kafka 를 모른다. `ProductRegistrationService` 는 Spring
+`ApplicationEvent`(`StockCheckRequired`)만 발행하고, `app-api` 의
+`@TransactionalEventListener(AFTER_COMMIT)` 가 Kafka 커맨드로 옮긴다.
+
+트랜잭션 안에서 곧바로 보내면 **커밋이 롤백돼도 메시지는 이미 나가 있다.** 존재하지 않는
+상품에 대한 체크 요청이 떠돌고, 컨슈머는 조회 실패로 계속 재시도하다 DLT 로 간다.
+
+발행이 실패하면 게이트를 **되돌린다.** 안 그러면 TTL 동안 아무도 체크를 요청하지 못하는
+창이 생긴다.
+
+#### 체커가 core 서비스를 직접 부르는 것에 대해
+
+체크 결과 반영(`StockObservationService`)은 Kafka 를 한 바퀴 더 돌지 않고 체커가 직접 호출한다.
+이 시스템은 마이크로서비스가 아니라 **같은 MySQL 을 보는 모듈러 모놀리스**다 (§10.1).
+프로세스 경계를 넘겨야 하는 것은 **재입고 사실**뿐이고, 그것만 `stock.restocked.v1` 로 나간다.
+
+`StockObservationService` 의 메서드가 판정 결과 enum 하나를 받지 않고 셋
+(`recordObservation` / `recordFailure` / `recordNotFound`)으로 갈린 이유: 체커의
+`CheckOutcome`(IN_STOCK/OUT_OF_STOCK/UNKNOWN/BLOCKED/NOT_FOUND)을 core 가 알 필요가 없다.
+도메인이 구분해야 하는 것은 **관측했다 / 못 했다 / 사라졌다** 셋뿐이고, BLOCKED 와 UNKNOWN 을
+하나로 접는 판단은 호출하는 쪽에 남는다.
+
+---
+
 ## 8. 미결정 사항
 
 | 항목 | 선택지 | 비고 |
