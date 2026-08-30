@@ -144,23 +144,97 @@ Kafka = 실제 컴포넌트 경계.
 
 ### 4.1 상태 전이
 
+**상태는 한 축이 아니라 두 축이다.** 초안은 재고 상태와 감시 생명주기를 한 컬럼에 넣었는데,
+그러면 실제 버그가 난다 (아래 참고). 성격도 변경 빈도도 다르므로 나눈다.
+
+| 축 | 값 | 무엇인가 | 변경 빈도 |
+|---|---|---|---|
+| `last_status` | `UNKNOWN` / `IN_STOCK` / `OUT_OF_STOCK` | 관측된 **사실** | 5분마다 |
+| `monitoring_status` | `ACTIVE` / `SUSPENDED` / `DELISTED` | 우리의 **결정** | 드물게 |
+
+#### ① 재고 상태
+
 ```mermaid
 stateDiagram-v2
     [*] --> UNKNOWN: 상품 등록
-    UNKNOWN --> IN_STOCK: 첫 체크 (알림 없음)
-    UNKNOWN --> OUT_OF_STOCK: 첫 체크
+    UNKNOWN --> IN_STOCK: 첫 관측 (알림 없음)
+    UNKNOWN --> OUT_OF_STOCK: 첫 관측
     IN_STOCK --> OUT_OF_STOCK: 품절됨
     OUT_OF_STOCK --> IN_STOCK: 🔔 재입고! 알림 발행
-    IN_STOCK --> UNKNOWN: 판정 실패
-    OUT_OF_STOCK --> UNKNOWN: 판정 실패
-    UNKNOWN --> SUSPENDED: 연속 실패 N회
-    SUSPENDED --> [*]
 ```
 
 **알림이 나가는 전이는 `OUT_OF_STOCK → IN_STOCK` 단 하나다.**
 
 - 등록 시점에 이미 재고가 있으면 알리지 않는다 (그냥 사면 된다). `IN_STOCK`으로 기록만 하고 품절될 때를 기다린다.
 - `UNKNOWN → IN_STOCK`도 알리지 않는다. 직전에 진짜 품절이었는지 확신할 수 없다.
+
+#### ② 감시 생명주기
+
+```mermaid
+stateDiagram-v2
+    [*] --> ACTIVE: 상품 등록
+    ACTIVE --> SUSPENDED: 연속 판정 실패 N회
+    SUSPENDED --> ACTIVE: 관측에 다시 성공
+    ACTIVE --> DELISTED: 상품 페이지 없음
+    DELISTED --> [*]
+```
+
+#### ⚠️ 판정 실패는 `last_status` 를 건드리지 않는다
+
+초안에는 `IN_STOCK → UNKNOWN: 판정 실패` 전이가 있었다. **그건 지웠다.**
+판정 실패는 새로운 사실을 알려주지 않으므로, 마지막으로 *관측된* 사실을 지울 이유가 없다.
+지우면 이렇게 된다:
+
+```
+09:00  OUT_OF_STOCK 관측
+09:05  차단당해 실패 → last_status 를 UNKNOWN 으로 덮으면
+09:10  IN_STOCK 관측 → UNKNOWN → IN_STOCK 이라 알림 없음   ← 재입고 누락
+```
+
+**실패 한 번이 곧바로 재입고 누락이 된다.** §7.1 대로 네이버 차단이 흔한 상황에서
+5분 주기로 돌면 자주 일어난다.
+
+규칙 2(fail-closed)와 충돌하지 않는다. 규칙 2의 뜻은 "판정 실패를 재입고로 취급하지 마라"이고,
+상태를 바꾸지 않으면 전이 자체가 없으므로 알림도 없다. 오히려 `UNKNOWN` 으로 덮는 쪽이
+정보를 잃는다.
+
+그래서 **`UNKNOWN` 의 뜻이 좁아진다** — "지금 상태를 모른다"가 아니라
+**"아직 한 번도 관측하지 못했다"** 다. 이건 4단계의 `PENDING` 게이트와 정확히 맞물린다:
+`last_status == UNKNOWN` 은 "기준선 없음" 을 뜻하고, 그 상태에서는 구독이 `ACTIVE` 가 될 수 없다.
+
+두 시각 컬럼의 뜻도 갈린다:
+
+| 컬럼 | 의미 |
+|---|---|
+| `last_checked_at` | 마지막 체크 **시도** 시각 (성공/실패 무관). 스케줄링용 |
+| `last_status` | 마지막 **성공한 관측** 결과. 한 번도 없으면 `UNKNOWN` |
+
+#### 왜 한 컬럼이면 안 되는가
+
+`OUT_OF_STOCK` 상품이 연속 실패로 `SUSPENDED` 가 되는 순간 `OUT_OF_STOCK` 이 덮어써져
+사라진다. 감시를 재개하면 `UNKNOWN` 부터 시작하고, 위 규칙상 `UNKNOWN → IN_STOCK` 은
+알리지 않으므로 **재입고를 통째로 놓친다.** 이 서비스의 존재 이유가 그 한 번인데도.
+
+축을 나누면 `SUSPENDED` 가 재고 상태를 건드리지 않으므로, 재개 직후의 재입고도 정상적으로 잡힌다.
+(`ProductStateTest.중단됐다가 재개된 직후의 재입고도 잡는다`)
+
+#### 체크 주기
+
+고정 5분 + 연속 실패 시 지수 백오프. 적응형 간격은 실측이 쌓인 뒤에 판단한다.
+
+감지 실패에는 두 축이 있고 **서로 상충한다**:
+
+| | 원인 | 간격을 줄이면 |
+|---|---|---|
+| A. 기준선 부재 | 관측 **실패**(차단) | 악화된다 (더 긁을수록 더 막힌다) |
+| B. 전이 누락 | 관측 **빈도** 부족 | 개선된다 |
+
+B 로 잃는 알림은 대부분 "배치 간격보다 빨리 소진되는 재입고" 라 사용자가 클릭했을 땐
+이미 매진이다. 그래서 우선순위는 A 이고, 간격을 줄이는 대신 실패 시 물러난다.
+B 의 한계("체크 주기는 5분이며 그보다 짧게 소진되는 재입고는 놓칠 수 있습니다")는 화면에 명시한다.
+
+백오프 상한은 두 개다. 기준선 확보 **전**에는 5분(사용자가 등록 결과를 기다리는 중이다),
+**후**에는 1시간(이미 감시 중인데 계속 실패한다면 차단당하고 있다는 뜻이다).
 
 ### 4.2 테이블
 
@@ -174,8 +248,11 @@ CREATE TABLE product (
     product_url          VARCHAR(1024) NOT NULL,  -- 정규화된 원본 URL
     name                 VARCHAR(512) NULL,       -- 첫 체크 때 채움
     thumbnail_url        VARCHAR(1024) NULL,
+    -- ① 관측된 사실:  UNKNOWN | IN_STOCK | OUT_OF_STOCK
     last_status          VARCHAR(32)  NOT NULL DEFAULT 'UNKNOWN',
-    last_checked_at      DATETIME(6)  NULL,
+    -- ② 우리의 결정:  ACTIVE | SUSPENDED | DELISTED   (§4.1 — 축을 나눈 이유)
+    monitoring_status    VARCHAR(32)  NOT NULL DEFAULT 'ACTIVE',
+    last_checked_at      DATETIME(6)  NULL,       -- 마지막 '시도' (성공/실패 무관)
     next_check_at        DATETIME(6)  NOT NULL,   -- 배치 선점용 핵심 컬럼
     check_interval_sec   INT          NOT NULL DEFAULT 300,
     consecutive_failures INT          NOT NULL DEFAULT 0,
@@ -183,7 +260,13 @@ CREATE TABLE product (
     updated_at           DATETIME(6)  NOT NULL,
     PRIMARY KEY (id),
     UNIQUE KEY uk_product_external (platform, store_id, external_product_no),
-    KEY idx_product_due (last_status, next_check_at)   -- 배치 조회용
+    -- ⚠️ 위 UNIQUE 만으로는 부족하다. 상품번호가 전역 시퀀스라면 판매자가 스토어
+    -- 슬러그를 바꿨을 때 같은 상품이 두 행이 되어 알림이 두 번 나간다.
+    -- 등록 시 이 인덱스로 먼저 조회해 기존 행을 재사용한다.
+    KEY idx_product_no (external_product_no),
+    -- 배치 조회용. 재고 상태로 거르지 않는다 — IN_STOCK 상품도 계속 봐야
+    -- 품절 → 재입고를 잡을 수 있다.
+    KEY idx_product_due (monitoring_status, next_check_at)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_unicode_ci;
 
 -- 구독 (한 상품에 여러 구독자)
