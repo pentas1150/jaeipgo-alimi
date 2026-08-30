@@ -14,6 +14,8 @@ data:
   # (클라이언트는 부트스트랩 후 advertised 주소로 재접속하기 때문).
   SPRING_KAFKA_BOOTSTRAP_SERVERS: "kafka.alimi.svc.cluster.local:9092"
   SPRING_DATASOURCE_URL: "jdbc:mysql://mysql.alimi.svc.cluster.local:3306/alimi?useUnicode=true&characterEncoding=UTF-8&serverTimezone=UTC&rewriteBatchedStatements=true"
+  # 세션 저장소. 지금은 api 만 쓰지만, 5단계에서 크롤링 중복 방지(SETNX)도 같은 인스턴스를 쓴다.
+  SPRING_DATA_REDIS_HOST: "redis.alimi.svc.cluster.local"
   TZ: "UTC"
 
 # Secret 은 여기 없다.

@@ -84,6 +84,37 @@ spring:
       # k8s 에서는 차라리 기동에 실패하고 재시작되게 두는 쪽이 맞다.
       fail-fast: true
 
+  # ── 구글 OAuth (app-api 만 사용) ────────────────────────────────
+  # ⚠️ redirect-uri 가 `/api/` 아래인 이유: nginx 는 location /api/ 만 백엔드로
+  # 프록시하고 나머지는 SPA fallback 이다. Security 기본 경로를 그대로 쓰면
+  # nginx 가 index.html 을 돌려줘 콜백이 백엔드에 도달하지 못한다.
+  # 구글 콘솔 등록값도 이것과 같아야 한다. (SecurityConfig 주석 참고)
+  #
+  # 기본값이 진짜 자격증명이 아닌 이유: 자격증명 없이도 앱이 뜨고 테스트가 돌아야 한다.
+  # k8s 에서는 application-k8s.yml 이 기본값을 지워 **없으면 기동에 실패**하게 만든다.
+  security:
+    oauth2:
+      client:
+        registration:
+          google:
+            client-id: ${GOOGLE_CLIENT_ID:not-configured}
+            client-secret: ${GOOGLE_CLIENT_SECRET:not-configured}
+            scope: openid,email,profile
+            redirect-uri: "{baseUrl}/api/login/oauth2/code/google"
+
+  data:
+    redis:
+      host: ${SPRING_DATA_REDIS_HOST:localhost}
+      port: ${SPRING_DATA_REDIS_PORT:6379}
+      timeout: 2s
+
+  # 세션을 Redis 에 둔다. api 는 파이에서 replicas=1 이고 maxUnavailable:0 + maxSurge:1 로
+  # 롤링하므로, 인메모리 세션이면 배포할 때마다 전원 로그아웃된다.
+  session:
+    timeout: 7d
+    redis:
+      namespace: alimi:session
+
 # 토픽 파티션 수 = 컨슈머 동시성 상한. 늘릴 수만 있고 줄일 수 없으며,
 # 늘리는 순간 key→partition 매핑이 바뀌어 productId 기준 순서 보장이 깨진다.
 # 그래서 처음부터 넉넉히 잡는다. (docs/DESIGN.md §5)
@@ -106,6 +137,17 @@ alimi:
 server:
   port: ${SERVER_PORT:8080}
   shutdown: graceful
+  servlet:
+    session:
+      cookie:
+        name: ALIMISESSION
+        http-only: true
+        # Lax 는 cross-site POST 에 쿠키를 싣지 않아 CSRF 방어의 한 겹이 된다.
+        # (CSRF 토큰은 SecurityConfig 에서 따로 켠다 — 이건 대책이 아니라 계층이다)
+        same-site: lax
+        # https 에서만 쿠키를 보낼지. 로컬은 http 라 켜면 로그인이 조용히 안 된다.
+        # k8s(application-k8s.yml)에서는 true 다 — 그래서 TLS 가 먼저 있어야 한다.
+        secure: ${ALIMI_COOKIE_SECURE:false}
 
 management:
   endpoints:

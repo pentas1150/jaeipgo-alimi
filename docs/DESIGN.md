@@ -395,7 +395,7 @@ stock.restocked 수신
 | 항목 | 선택지 | 비고 |
 |------|--------|------|
 | **알림 채널** | 이메일(SMTP/SES) / 디스코드·텔레그램 웹훅 / 카카오 알림톡 / 웹푸시 | 웹훅이 구현 부담 최소. 알림톡은 사업자 등록 + 채널 심사 필요 |
-| **인증 범위** | 계정 없이 이메일만 / 이메일 검증 링크 / OAuth2 소셜 로그인 | 계정 없이 시작하면 스팸 등록 위험 → 최소한 검증 링크 권장 |
+| ~~**인증 범위**~~ | **결정됨 → 구글 OAuth2.** §8.1 참고 | 계정 없이 시작하면 스팸 등록 위험. OAuth 는 **검증된 이메일**을 받아오므로 검증 링크 플로우가 통째로 필요 없어진다 |
 | **프론트엔드** | 없음(API만) / 간단한 웹 페이지 | |
 | **Spring Batch 유지 여부** | Batch / `@Scheduled` 단순 루프 | §6.1 참고 |
 | **Outbox 도입 시점** | 지금 / 유실 관측 후 | §3.2 참고 |
@@ -403,6 +403,76 @@ stock.restocked 수신
 | ~~**배포 형태**~~ | ~~단일 앱 / 분리 배포~~ | **결정됨** → §12. 역할 4개로 분리, kind + KEDA |
 | **scheduler 단일 실행 보장** | `Recreate` 전략만 / ShedLock·리더 선출 | §12.2 |
 | **컨슈머 readiness** | actuator 기본 / 커스텀 HealthIndicator | §12.8 |
+
+---
+
+### 8.1 인증 — 구글 OAuth2 로 확정
+
+`users` 테이블과 구글 로그인을 도입한다. 이는 §4.2 의 `watch` 설계 변경을 동반한다 —
+원안은 `channel_target`(이메일 주소) 자체가 신원이었으나, 이제 `watch` 가 `user_id` 를 참조한다.
+
+**왜 자체 회원가입이 아니라 OAuth 인가.** 이 서비스는 알림 수신 주소가 진짜여야 의미가 있다.
+자체 가입이면 검증 링크 플로우(토큰 테이블 + 메일 발송 + 만료 처리)를 따로 만들어야 하는데,
+구글은 **검증된 이메일**(`email_verified`)을 그냥 준다. 비밀번호 저장·리셋·유출 책임도 사라진다.
+§8 표가 "최소한 검증 링크 권장" 이라고 한 요구가 OAuth 하나로 해소된다.
+
+**신원은 이메일이 아니라 `(provider, provider_user_id)` 다.** 구글 계정의 이메일은 바뀔 수 있고
+불변 식별자는 `sub` 다. 이메일을 신원으로 삼으면 사용자가 주소를 바꾸는 순간 계정을 잃는다.
+`email` 은 신원이 아니라 **알림 수신 주소**이므로 로그인할 때마다 최신값으로 갱신한다.
+
+**`provider` 축을 지금 둔다.** 규칙 10 때문에 컬럼 추가는 공짜지만 DROP/RENAME 은 배포 두 번이다.
+`provider` 가 있으면 카카오/네이버/자체로그인 추가가 **마이그레이션 없이 행 추가**로 끝난다.
+반대로 `password_hash` 는 지금 쓰지 않으므로 넣지 않았다 — 필요해지면 그때 추가하면 되고,
+추가는 공짜다.
+
+**`email_verified` 는 보안 컬럼이다.** 나중에 "이미 있는 이메일에 다른 provider 로그인이
+들어오면 같은 계정으로 연결" 을 구현할 때, 검증 여부를 보지 않고 이메일만으로 연결하면
+계정 탈취가 된다. 지금은 그 상황에서 **조용히 붙지 않고 실패**시킨다(`EmailAlreadyRegisteredException`).
+
+#### ⚠️ OAuth 경로는 `/api/` 아래여야 한다
+
+`frontend/nginx.conf` 는 `location /api/` 만 백엔드로 프록시하고 나머지는 SPA fallback 이다.
+Spring Security 기본 경로(`/oauth2/authorization/google`, `/login/oauth2/code/google`)는
+`/api/` **밖**이라, 그대로 두면 nginx 가 `index.html` 을 돌려줘 **OAuth 가 시작조차 못 한다.**
+콜백도 마찬가지라 구글이 준 `code` 가 백엔드에 도달하지 못한다.
+
+그래서 nginx 를 고치는 대신 Security 경로를 `/api/` 아래로 내렸다. §10.3 대로 이 프로젝트는
+"프론트와 API 가 같은 오리진" 이라는 불변식으로 CORS 를 통째로 없앴는데, 경로를 추가로 뚫으면
+nginx + Ingress + vite dev 프록시 **세 곳**을 고쳐야 하고 그 불변식이 흐려진다.
+
+구글 콘솔 등록값: `https://<도메인>/api/login/oauth2/code/google`
+
+#### 세션은 Redis 에 둔다
+
+`alimi-api` 는 파이에서 `replicas=1` 이고 `maxUnavailable:0 + maxSurge:1` 로 롤링하므로,
+인메모리 세션이면 **배포할 때마다 전원 로그아웃**된다. `spring-session-data-redis` 는
+애플리케이션 코드가 0줄이다. Redis 는 §5단계의 크롤링 중복 방지(SETNX)에서 같은 인스턴스를 쓴다.
+
+영속화는 끈다(`save "" / appendonly no`). 담는 것이 전부 TTL 이 붙은 임시 데이터이고,
+그 대가로 microSD 에 쓰기를 만들지 않는다. 메모리 예산은 §12.10 표를 참고
+(redis 32Mi 추가로 롤링 서지 시 여유가 140Mi → 42Mi 로 줄었다).
+
+#### 컨트롤러는 공급자를 모른다
+
+`OAuth2UserService` 구현체가 로그인 시 `users` 를 upsert 하고 principal 을 `AuthUser` 로 바꿔 끼운다.
+
+```kotlin
+@PostMapping("/api/watches")
+fun register(@AuthenticationPrincipal me: AuthUser, ...) = ...
+```
+
+카카오를 추가할 때 바뀌는 곳은 `AlimiOAuth2UserService` 의 분기 하나이고 컨트롤러는 그대로다.
+§11 `NotificationSender` 포트와 같은 모양이다.
+
+⚠️ `AuthUser` 는 `Serializable` 이어야 한다. 세션이 Redis 에 JDK 직렬화로 저장되기 때문이다.
+
+#### 반드시 열어둬야 하는 것
+
+`app-api` 에 Security 가 붙는 순간 `/actuator/health/**` 가 401 이 되고 **liveness/readiness 가
+전부 실패해 파드가 계속 죽는다** (§12.11 에 프로브로 데인 이력이 있다). `permitAll` 로 열어둔다.
+
+미인증 요청은 302(로그인 페이지 리다이렉트)가 아니라 **401 + ProblemDetail** 이어야 한다.
+프론트가 `fetch` 로 받은 HTML 을 JSON 으로 파싱하려다 엉뚱한 곳에서 실패하기 때문이다.
 
 ---
 

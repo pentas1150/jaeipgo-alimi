@@ -69,3 +69,52 @@ button:hover { opacity: .9; }
 .result { margin-top: 1rem; font-size: .9rem; min-height: 1.4rem; color: var(--muted); }
 .result.ok { color: var(--accent); }
 .result.err { color: var(--err); }
+
+/* ── 계정 영역 ──────────────────────────────────────────────── */
+.top {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.account {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  font-size: 0.875rem;
+  color: var(--muted);
+}
+
+.account .who {
+  /* 긴 이메일이 헤더를 밀어내지 않게 한다. */
+  max-width: 16rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.linkish {
+  background: none;
+  border: 0;
+  padding: 0;
+  color: var(--muted);
+  font: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.linkish:hover { color: var(--fg); }
+
+.btn {
+  display: inline-block;
+  padding: 0.7rem 1.1rem;
+  border-radius: 8px;
+  background: var(--accent);
+  color: var(--bg);
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.btn:hover { filter: brightness(1.08); }

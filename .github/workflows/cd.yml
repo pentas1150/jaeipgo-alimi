@@ -339,9 +339,12 @@ jobs:
           }
           kubectl -n alimi wait --for=condition=ready pod/mysql-0 --timeout=300s || fail mysql-0
           kubectl -n alimi wait --for=condition=ready pod/kafka-0 --timeout=300s || fail kafka-0
+          # 세션 저장소. api 가 기동 시 붙으므로 앱 롤링 전에 떠 있어야 한다.
+          # (StatefulSet 이 아니라 Deployment 라 파드 이름이 고정이 아니다)
+          kubectl -n alimi rollout status deploy/redis --timeout=180s
           # Ingress 입구. 이게 없으면 스모크가 "connection refused" 로만 실패해 원인이 안 보인다.
           kubectl -n kube-system rollout status deploy/traefik --timeout=180s
-          echo "mysql-0 / kafka-0 / traefik Ready"
+          echo "mysql-0 / kafka-0 / redis / traefik Ready"
 
       # ── 2단계: 앱 롤링 업데이트 ────────────────────────────────────
       - name: 2단계 — 앱 배포

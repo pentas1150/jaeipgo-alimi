@@ -18,13 +18,18 @@ kind: Kustomization
 # 스케줄러가 보는 것은 "실제 사용량"이 아니라 "request 합"이다. 그래서 둘을 나눠 센다.
 #
 #   우리 파드 request  mysql 384 + kafka 448 + api 288 + scheduler 256
-#                     + notifier 256 + checker 512 + frontend 24     = 2,168Mi
+#                     + notifier 256 + checker 512 + frontend 24
+#                     + redis 32                                    = 2,200Mi
 #   k3s 시스템 파드    coredns 70Mi (traefik / local-path 는 request 미설정) ≈ 70Mi
 #   ──────────────────────────────────────────────────────────────────
-#   평시 2,238Mi  /  api 롤링 서지(+288Mi) 시 최대 2,456Mi  ← 2,600Mi 안에 들어간다
+#   평시 2,270Mi  /  api 롤링 서지(+288Mi) 시 최대 2,558Mi  ← 2,600Mi 안에 들어간다
 #
-# 여유가 약 140Mi 다. 그래서 서지를 만드는 역할은 api 와 frontend 뿐이고,
-# 나머지(checker/notifier/scheduler)는 Recreate 다.
+# 여유가 약 42Mi 로 줄었다. redis(세션 저장소 + 5단계의 크롤링 중복 방지 락)를 들이면서
+# 32Mi 를 썼기 때문이다. 그래서 서지를 만드는 역할은 api 와 frontend 뿐이고,
+# 나머지(checker/notifier/scheduler/redis)는 Recreate 다.
+#
+# ⚠️ 여기서 파드를 하나 더 늘리려면 다른 곳을 먼저 깎아야 한다. 다음에 무언가를
+#    추가할 때 이 표를 다시 계산하지 않으면 롤링이 Pending 으로 멈춘다.
 #
 # ⚠️ request 는 넉넉히 잡는 게 아니라 **실제에 가깝게** 잡아야 한다. 낮춰 적으면
 # 스케줄러만 낙관적이 되고 노드는 그대로 터진다. 실사용 스파이크는 limit + zram 이 받는다.

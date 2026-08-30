@@ -27,6 +27,7 @@ resources:
   - migration-job.yaml
   - infra/mysql.yaml
   - infra/kafka.yaml
+  - infra/redis.yaml
   - app/api.yaml
   - app/scheduler.yaml
   - app/checker.yaml
