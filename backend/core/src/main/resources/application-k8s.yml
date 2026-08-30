@@ -12,6 +12,23 @@ spring:
     # 스키마가 없으면 JPA ddl-auto=validate 가 기동을 실패시키므로,
     # Job 이 끝날 때까지 앱은 CrashLoop 하다가 자동으로 회복된다.
     enabled: false
+
+  # ⚠️ 기본값을 일부러 지웠다. 기본 application.yml 은 자격증명 없이도 앱이 뜨도록
+  # `not-configured` 를 넣어두는데, 운영에서 그러면 "로그인 버튼만 안 되는" 상태로
+  # 조용히 배포된다. 여기서는 없으면 **기동에 실패**하게 둔다
+  # (`spring.kafka.admin.fail-fast: true` 와 같은 판단이다).
+  security:
+    oauth2:
+      client:
+        registration:
+          google:
+            client-id: ${GOOGLE_CLIENT_ID}
+            client-secret: ${GOOGLE_CLIENT_SECRET}
+
+  data:
+    redis:
+      host: ${SPRING_DATA_REDIS_HOST:redis}
+
   # SMTP 접속 정보는 Secret 으로 주입한다 (k8s/base/config.yaml).
   # transport 를 smtp 로 바꾸기 전까지는 로그 전용 어댑터가 뜬다.
   mail:
@@ -30,6 +47,14 @@ spring:
           timeout: 10000
           writetimeout: 10000
 
+
+# 세션 쿠키를 https 에서만 보낸다. TLS 가 없으면 로그인이 조용히 안 되므로,
+# 이 값이 true 라는 건 k8s/pi/README.md §6.1 (도메인 + TLS)이 선행됐다는 뜻이다.
+server:
+  servlet:
+    session:
+      cookie:
+        secure: true
 
 logging:
   level:

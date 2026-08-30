@@ -51,6 +51,12 @@ spec:
               valueFrom: { secretKeyRef: { name: alimi-secret, key: MYSQL_USER } }
             - name: SPRING_DATASOURCE_PASSWORD
               valueFrom: { secretKeyRef: { name: alimi-secret, key: MYSQL_PASSWORD } }
+            # 구글 OAuth. application-k8s.yml 은 기본값을 지워뒀으므로
+            # 이 값이 비면 **기동에 실패**한다 (로그인만 조용히 안 되는 상태를 막는다).
+            - name: GOOGLE_CLIENT_ID
+              valueFrom: { secretKeyRef: { name: alimi-secret, key: GOOGLE_CLIENT_ID } }
+            - name: GOOGLE_CLIENT_SECRET
+              valueFrom: { secretKeyRef: { name: alimi-secret, key: GOOGLE_CLIENT_SECRET } }
           envFrom:
             - configMapRef: { name: alimi-config }
           # JVM 기동이 느리므로 startupProbe 로 감싼다. 이게 없으면

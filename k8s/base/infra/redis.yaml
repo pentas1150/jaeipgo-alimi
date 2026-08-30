@@ -1,0 +1,86 @@
+# 세션 저장소 겸 크롤링 중복 방지 락(SETNX) 저장소.
+#
+# StatefulSet + PVC 가 아니라 Deployment + emptyDir 인 이유:
+# 담는 것이 **전부 TTL 이 붙은 임시 데이터**다. 세션은 만료되고, 락도 만료된다.
+# 재시작하면 로그인이 풀리고 진행 중이던 락이 사라지는데, 락 소실은 오히려
+# 재시도로 이어져 안전하다. 그 대가로 microSD 에 쓰기를 하나도 만들지 않는다
+# (파이의 mysql/kafka 설정과 같은 판단 — docs/DESIGN.md §12).
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: alimi
+  labels:
+    app: redis
+    # 배포 1단계에서 먼저 올라와야 한다. api 가 기동 시 붙는다.
+    alimi.stage: infra
+spec:
+  selector:
+    app: redis
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: 6379
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  namespace: alimi
+  labels:
+    app: redis
+    alimi.stage: infra
+spec:
+  replicas: 1
+  strategy:
+    # 세션이 어차피 날아가므로 서지 파드를 만들 이유가 없다.
+    # 4GB 노드에서 불필요한 서지를 피한다.
+    type: Recreate
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+        alimi.stage: infra
+    spec:
+      containers:
+        - name: redis
+          image: redis:7-alpine
+          args:
+            - redis-server
+            # 영속화를 완전히 끈다. RDB 스냅샷도, AOF 도 없다.
+            - --save
+            - ""
+            - --appendonly
+            - "no"
+            # 컨테이너 limit(64Mi)보다 낮게 잡아 OOMKill 대신 redis 가 스스로 정리하게 한다.
+            - --maxmemory
+            - 32mb
+            # 세션도 락도 TTL 이 있으므로 만료 대상 중에서만 골라 버린다.
+            # allkeys-* 를 쓰면 TTL 이 남은 세션까지 날아간다.
+            - --maxmemory-policy
+            - volatile-lru
+          ports:
+            - name: redis
+              containerPort: 6379
+          readinessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            initialDelaySeconds: 2
+            periodSeconds: 10
+            timeoutSeconds: 3
+          livenessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            initialDelaySeconds: 10
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 5
+          resources:
+            requests:
+              memory: 32Mi
+              cpu: 50m
+            limits:
+              memory: 64Mi

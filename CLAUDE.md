@@ -82,6 +82,7 @@ CD 는 GitHub Secret `ALIMI_SECRET_ENV` 를 배포 시점에만 이 파일로 �
 구현된 것:
 - **알림 발송 추상화** (`app-notifier/send/`) — 포트 + 이메일/로그 어댑터 + 재시도 정책. 테스트 10개
 - `notification_log` 멱등성 (V2 마이그레이션)
+- **회원 + 구글 OAuth 로그인** (V3) — `core/user/`, `app-api/auth/`. 세션은 Redis (§8.1)
 
 아직 없는 것:
 - `Topics.kt` 의 실제 토픽들은 **생성만 되고 프로듀서/컨슈머가 없다**
@@ -89,6 +90,23 @@ CD 는 GitHub Secret `ALIMI_SECRET_ENV` 를 배포 시점에만 이 파일로 �
 - `notification.dispatch.v1` 은 **컨슈머만 있고 프로듀서가 없다** (팬아웃 미구현)
 - 이메일은 기본이 `log` 어댑터다. 실제 발송하려면 `alimi.notification.email.transport=smtp`
 - Spring Batch (`spring-boot-starter-batch`) 미추가 — 메타데이터 테이블 마이그레이션과 함께 도입
+
+## 인증
+
+**신원은 이메일이 아니라 `(provider, provider_user_id)` 다.** 구글 계정 이메일은 바뀔 수 있고
+불변 식별자는 `sub` 다. `email` 은 신원이 아니라 알림 수신 주소이므로 로그인마다 갱신한다.
+
+**컨트롤러는 공급자를 모른다.** `@AuthenticationPrincipal me: AuthUser` 만 받는다.
+공급자 추가 = `AlimiOAuth2UserService` 분기 1개. 컨트롤러는 수정하지 않는다. (§11 과 같은 모양)
+
+지켜야 할 것:
+- **OAuth 경로는 `/api/` 아래에 둔다.** nginx 가 `location /api/` 만 프록시하므로 Security 기본
+  경로를 쓰면 로그인이 시작조차 안 된다. 구글 콘솔 등록값도 `/api/login/oauth2/code/google`.
+- **`/actuator/health/**` 는 반드시 `permitAll`.** 막히면 프로브가 401 을 받아 파드가 계속 죽는다.
+- **미인증 응답은 302 가 아니라 401.** 프론트가 HTML 을 JSON 으로 파싱하려다 실패한다.
+- **세션에 담는 객체는 `Serializable`.** Redis 에 JDK 직렬화로 저장된다.
+- **`k8s` 프로파일은 `GOOGLE_CLIENT_ID`/`SECRET` 이 없으면 기동에 실패한다** — 일부러 그렇게 뒀다.
+  로컬(`local`/`docker`)에서는 `not-configured` 기본값으로 앱이 뜬다.
 
 ## 명령
 

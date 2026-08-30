@@ -50,6 +50,20 @@ services:
       retries: 15
       start_period: 30s
 
+  redis:
+    image: redis:7-alpine
+    container_name: alimi-redis
+    # 담는 것이 세션과 크롤링 중복 방지 락뿐이라 둘 다 TTL 이 있다.
+    # 영속화를 끄면 재시작 시 로그아웃되지만, microSD(파이)에 쓰기를 만들지 않는다.
+    command: ["redis-server", "--save", "", "--appendonly", "no", "--maxmemory", "32mb", "--maxmemory-policy", "volatile-lru"]
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
   kafka-ui:
     image: kafbat/kafka-ui:latest
     container_name: alimi-kafka-ui
@@ -92,6 +106,8 @@ services:
     depends_on:
       mysql: { condition: service_healthy }
       kafka: { condition: service_healthy }
+      # 세션 저장소. api 만 필요하지만 compose 에서는 항상 같이 뜬다.
+      redis: { condition: service_healthy }
       migration: { condition: service_completed_successfully }
     ports:
       - "${APP_PORT:-8080}:8080"
@@ -103,6 +119,16 @@ services:
       SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       # compose 에서는 앱이 마이그레이션을 돌리지 않는다 (migration 서비스가 담당)
       SPRING_FLYWAY_ENABLED: "false"
+      # ── 아래 둘은 api 만 쓴다 ──────────────────────────────────
+      # 이 블록이 &app-env 앵커라 다른 서비스에도 딸려가지만, oauth2 설정이 없는
+      # scheduler/checker/notifier 에서는 그냥 무시된다.
+      #
+      # 실제로 로그인을 해보려면 호스트에 값을 넣고 띄운다:
+      #   GOOGLE_CLIENT_ID=... GOOGLE_CLIENT_SECRET=... docker compose --profile app up
+      # 구글 콘솔에는 http://localhost:8080/api/login/oauth2/code/google 을 등록한다
+      # (구글이 http 를 허용하는 예외가 localhost 다).
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-not-configured}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-not-configured}
     profiles: ["app"]
 
   scheduler:
