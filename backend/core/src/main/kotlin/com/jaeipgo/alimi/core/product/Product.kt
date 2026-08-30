@@ -79,6 +79,23 @@ class Product(
     fun hasBaseline(): Boolean = lastStatus != StockStatus.UNKNOWN
 
     /**
+     * 새로 등록하려는 사람에게 답하기 위해 **지금 다시 긁어야 하는가.**
+     *
+     * 이미 최근에 관측했다면 그 결과를 그대로 쓴다. 페이지 요청은 이 서비스에서 가장
+     * 귀한 자원이다 — §7.1 대로 네이버가 봇을 차단하므로, 아낄 수 있는 요청은 아껴야
+     * 차단 확률이 내려간다. 인기 상품일수록 여러 명이 몰려 등록하는데, 그때마다 긁으면
+     * 정확히 가장 나쁜 순간에 가장 많이 긁는 셈이 된다.
+     *
+     * 기준이 [checkIntervalSec] 인 이유: 그보다 오래된 값은 어차피 다음 배치가 갱신할
+     * 예정이었던 값이다. 그 정도로 낡았으면 새로 보는 게 맞다.
+     */
+    fun needsFreshCheck(now: Instant): Boolean {
+        if (!hasBaseline()) return true
+        val checkedAt = lastCheckedAt ?: return true
+        return !checkedAt.plusSeconds(checkIntervalSec.toLong()).isAfter(now)
+    }
+
+    /**
      * 체크 결과를 반영하고 **알림이 필요한 전이인지** 돌려준다.
      *
      * 알림이 나가는 전이는 `OUT_OF_STOCK → IN_STOCK` **단 하나다** (규칙 1).

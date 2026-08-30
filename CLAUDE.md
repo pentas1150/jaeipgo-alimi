@@ -87,9 +87,10 @@ CD 는 GitHub Secret `ALIMI_SECRET_ENV` 를 배포 시점에만 이 파일로 �
 - **회원 + 구글 OAuth 로그인** (V3) — `core/user/`, `app-api/auth/`. 세션은 Redis (§8.1)
 - **`Product` 엔티티 + 상태 전이** (V4) — `core/product/`. 재고/감시 2축 분리 (§4.1)
 - **상품 URL 파싱/검증** — `core/product/SmartStoreUrl` + `@SmartStoreUrl` 제약 (§7.2)
+- **체크 요청 파이프라인** — 등록 upsert → AFTER_COMMIT → Redis SETNX 게이트 → Kafka (§7.3)
 
 아직 없는 것:
-- `Topics.kt` 의 실제 토픽들은 **생성만 되고 프로듀서/컨슈머가 없다**
+- `stock.check.requested.v1` 은 **프로듀서만 있고 컨슈머가 없다** (체커 판정 코드 대기)
 - `app-checker` 에 Playwright 의존성은 있으나 **판정 코드가 없다** (셀렉터 미확정)
 - `notification.dispatch.v1` 은 **컨슈머만 있고 프로듀서가 없다** (팬아웃 미구현)
 - 이메일은 기본이 `log` 어댑터다. 실제 발송하려면 `alimi.notification.email.transport=smtp`
