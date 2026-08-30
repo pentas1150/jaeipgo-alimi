@@ -30,3 +30,7 @@ k8s/base/secret.env
 
 # Logs
 *.log
+
+# 캡처 도구가 실제 페이지에서 떠온 픽스처. 검토 후 손으로 옮겨 커밋한다.
+# 원본에는 판매자 개인정보가 섞일 수 있으므로 자동 커밋되지 않게 막는다.
+backend/app-checker/src/test/resources/fixtures/captured/

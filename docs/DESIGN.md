@@ -388,44 +388,136 @@ Writer  : (1) product UPDATE  (2) Kafka send
 > `@Scheduled` + 단순 반복으로도 충분하다. **Batch를 쓰는 이유가 재시작 가능성/실행 이력/청크 관리라면 유지**하고,
 > 단지 스케줄링이 목적이라면 `@Scheduled`가 코드가 훨씬 적다. 학습·포트폴리오 목적이면 Batch 유지가 맞다.
 
-### 6.2 Playwright Consumer
+### 6.2 Playwright Consumer `[구현됨]`
 
-의존성: `com.microsoft.playwright:playwright` (버전은 Maven Central에서 최신 확인).
-브라우저 바이너리 다운로드가 필요하므로 **Docker 이미지에 `mcr.microsoft.com/playwright/java` 베이스 또는
-브라우저 설치 단계**가 들어가야 한다. (JRE 슬림 이미지로는 안 된다 — Dockerfile 수정 필요)
+`app-checker/check/` 에 구현. 아래는 **실제로 짜면서 확인된 것**이다.
 
-**브라우저 수명 관리 — 중요**
+의존성: `com.microsoft.playwright:playwright`. 브라우저 바이너리가 필요하므로 Docker 이미지는
+`mcr.microsoft.com/playwright/java` 베이스여야 한다 (JRE 슬림으로는 안 된다).
+
+**판정을 IO에서 분리한다 — 이게 구조의 핵심이다**
 
 ```
-Browser        : 애플리케이션당 1개. @Bean 으로 싱글턴, @PreDestroy 에서 close. (기동 비용 큼)
-BrowserContext : 체크 1건당 새로 만들고 반드시 닫는다. (쿠키/캐시 격리, 생성 비용 저렴)
+PageSnapshot              페이지에서 긁어온 원재료 (상태 JSON + 버튼 + HTTP 상태 + title)
+StockVerdictResolver      PageSnapshot -> CheckResult.  순수 함수. 단위 테스트는 여기만
+PlaywrightSnapshotLoader  URL -> PageSnapshot.          유일한 IO
+StockChecker              둘을 합친 진입점
+```
+
+**네이버는 브라우저가 아닌 클라이언트를 전부 차단하므로 CI가 실제 페이지를 여는 건 불가능하다.**
+따라서 이 분리는 취향이 아니라 테스트가 존재하기 위한 전제다. 판정 테스트는 픽스처로 돈다.
+
+**브라우저 수명 관리**
+
+```
+Playwright     : 앱당 1개. @Bean.
+Browser        : 앱당 1개. @Bean.
+BrowserContext : 체크 1건당 새로 만들고 반드시 닫는다. use {} 로 강제.
 Page           : context 안에서 1개
 ```
 
-`BrowserContext`를 안 닫으면 메모리가 그대로 샌다. `use {}` 또는 `try/finally`로 강제한다.
+⚠️ **Playwright Java는 스레드 안전하지 않다.** 공식 문서: *"all its methods as well as methods on
+all objects created by it are expected to be called on the same thread where the Playwright object
+was created"*. 따라서 **`@KafkaListener(concurrency = N)` 을 쓰면 안 된다.**
+`concurrency = 1` + `max.poll.records = 1` 로 두고 **동시성은 KEDA가 파드 수로 올린다.**
+파티션 12 / `maxReplicaCount: 12` 가 원래 그러라고 있는 구조다.
 
-**판정 로직**
+⚠️ **종료는 Spring에 맡긴다.** `Playwright` / `Browser` 는 둘 다 `AutoCloseable` 이라 Spring이
+`close()` 를 소멸 메서드로 잡고 의존 역순(browser → playwright)으로 닫는다 — 정확히 원하는 순서다.
+`@PreDestroy` 로 직접 닫으면 Spring이 이미 `Playwright` 를 닫은 뒤에 호출돼
+`browser.close()` 가 죽은 연결에 메시지를 보내다 예외를 던진다. (실제로 겪었다)
 
-```kotlin
-// 셀렉터는 실제 페이지를 열어보고 확정할 것 — 아래는 구조 예시
-enum class StockStatus { IN_STOCK, OUT_OF_STOCK, UNKNOWN, SUSPENDED }
+**판정 규칙 `[확정]`**
 
-fun check(url: String): StockStatus {
-    // 1. networkidle 대기 (SPA 렌더 완료)
-    // 2. 구매 버튼 요소 탐색
-    // 3. 없음        -> UNKNOWN (셀렉터 깨짐 의심)
-    //    disabled    -> OUT_OF_STOCK
-    //    "품절" 텍스트 -> OUT_OF_STOCK
-    //    활성        -> IN_STOCK
-    // 4. 예외/타임아웃 -> UNKNOWN
-}
+실측: 품절 상품 → `productStatusType: "OUTOFSTOCK"`, 재고 상품 → `productStatusType: "SALE"`.
+
+```
+1. HTTP 404                            -> NOT_FOUND
+2. HTTP 429 또는 title에 "시스템오류"      -> BLOCKED
+3. __PRELOADED_STATE__ 없음              -> UNKNOWN
+4. simpleProductForDetailPage 없음       -> UNKNOWN
+5. .id != URL의 상품번호                 -> UNKNOWN     ← 아래 함정
+6. .productStatusType 화이트리스트
+     "SALE"       -> IN_STOCK
+     "OUTOFSTOCK" -> OUT_OF_STOCK
+     그 외/null   -> UNKNOWN
+7. 버튼 텍스트가 6번과 정반대면            -> UNKNOWN 으로 강등
 ```
 
-- **셀렉터는 반드시 상수로 한 곳에 모은다.** 네이버가 마크업을 바꾸면 여기만 고치면 되도록.
-- 텍스트 매칭("품절")은 마크업 변경에 강하지만 오탐도 가능하다. **`disabled` 속성 + 텍스트를 함께** 본다.
-- 타임아웃은 넉넉히(15~30초). 대신 컨슈머 `max.poll.interval.ms`를 그보다 크게 잡아야 리밸런스가 안 터진다.
+⚠️ **6번을 반드시 화이트리스트로 짠다.** `!= "OUTOFSTOCK"` 로 짜면 `SUSPENSION`(판매중지),
+`CLOSE`(판매종료)가 전부 "재고 있음"이 되어 가짜 알림이 나간다.
 
-**동시성**: `@KafkaListener(concurrency = N)`. N = 파티션 수 이하 & 메모리 여유 이하.
+⚠️ **`__PRELOADED_STATE__` 안에 상품 객체가 두 개다.**
+
+| 경로 | 품절 상품에서 | 정체 |
+|------|--------------|------|
+| `product` | `id: null`, `productStatusType: null`, **`soldout: false`** | Redux 초기값(껍데기) |
+| `simpleProductForDetailPage` | `id: 13112687319`, `"OUTOFSTOCK"` | SSR로 채워진 진짜 데이터 |
+
+**`product.soldout` 은 품절 상품에서 `false` 다.** 이름만 보고 읽으면 품절을 "품절 아님"으로 읽어
+가짜 재입고 알림이 나간다. `id` 를 URL의 상품번호와 대조하는 가드가 반드시 있어야 하며,
+이 함정은 `StockVerdictResolverTest` 에 회귀 테스트로 박아뒀다.
+
+⚠️ **이름만 그럴듯하고 재고와 무관한 필드들** (품절 상품에서의 실측값):
+`enableCart: true`, `displayable: true`, `channelProductDisplayStatusType: "ON"`.
+재고 신호는 `productStatusType` 하나뿐이다.
+
+`stockQuantity` 는 판정에 쓰지 않는다 — 품절일 때 0인 건 봤지만 재고가 있을 때 채워지는지
+확인하지 못했다. 로그로만 남긴다.
+
+**셀렉터는 `SmartStoreFields.kt` 한 곳에 모은다.** CSS 클래스 셀렉터는 하나도 쓰지 않는다 —
+네이버 프론트의 클래스명은 `_2LWuGdF1jw` 같은 해시라 배포마다 바뀐다.
+상태 JSON의 키와 화면의 한국어 문구만 쓴다.
+
+**대기는 로드 이벤트가 아니라 필요한 것 자체를 기다린다.**
+`networkidle` 은 추천/리뷰 위젯이 계속 요청을 날려 오지 않거나 아주 늦게 온다.
+`DOMCONTENTLOADED` 후 `waitForFunction` 으로 `__PRELOADED_STATE__` 를 기다린다 —
+HTTP 200을 받고도 상태 객체가 아직 없는 경우를 실측했다.
+
+#### 체커 ↔ Kafka 배선 `[구현됨]`
+
+```
+stock.check.requested.v1
+        │  (concurrency=1 — Playwright 는 스레드 안전하지 않다)
+        ▼
+StockCheckListener
+        ├─ StockChecker.check(url, externalProductNo)   ← URL 을 재파싱하지 않는다
+        ▼  CheckOutcome
+   IN_STOCK / OUT_OF_STOCK → StockObservationService.recordObservation()
+   UNKNOWN                 → recordFailure()   실패로 센다
+   BLOCKED                 → recordBlocked()   실패로 세지 않는다
+   NOT_FOUND               → recordNotFound()
+        ▼  (재입고일 때만, AFTER_COMMIT)
+   stock.restocked.v1
+```
+
+**`concurrency` 를 올리면 안 된다.** Playwright Java 는 스레드 안전하지 않고 브라우저는
+파드당 하나다. 동시성은 KEDA 가 **파드 수**로 올린다 — 파티션 12 / maxReplicaCount 12 가
+그러라고 있는 구조다.
+
+**상품번호는 이벤트에 실려 온다.** 체커가 URL 을 다시 파싱하지 않는 이유는 §7.2 참고 —
+파싱이 두 곳에 있으면 언젠가 느슨한 쪽이 신뢰 경계로 새어 들어간다.
+
+**결과 반영은 Kafka 를 한 바퀴 더 돌지 않는다.** 체커가 `core` 의 `StockObservationService`
+를 직접 부른다. 이 시스템은 마이크로서비스가 아니라 같은 MySQL 을 보는 모듈러 모놀리스다
+(§10.1). 프로세스 경계를 넘겨야 하는 것은 **재입고 사실**뿐이다.
+
+#### ⚠️ `BLOCKED` 와 `UNKNOWN` 은 다르게 세야 한다
+
+| | `last_status` | `consecutive_failures` | 다음 체크 |
+|---|---|---|---|
+| `UNKNOWN` (판정 실패) | 그대로 | **+1** → N회면 `SUSPENDED` | 지수 백오프 |
+| `BLOCKED` (차단) | 그대로 | **건드리지 않음** | 15분 + 0~5분 지터 |
+
+차단은 우리 셀렉터가 깨진 게 아니라 **상대 쪽 사정**이고, 보통 한 상품이 아니라
+**전 상품에 동시에** 걸린다. 실패로 세면 차단 한 번에 감시 목록 전체가 `SUSPENDED` 로
+내려가고, 정작 차단이 풀렸을 때 **아무도 감시하고 있지 않은 상태**가 된다.
+
+지터를 섞는 이유도 같다. 차단이 전 상품에 걸린 상태에서 고정 시간만 물러나면
+**전부 같은 순간에 돌아와** 다시 차단당한다.
+
+둘 다 `last_status` 를 건드리지 않는 것은 §4.1 과 같은 이유다 —
+실패는 새로운 사실을 알려주지 않고, 지우면 실패 한 번이 곧바로 재입고 누락이 된다.
 
 ### 6.3 Restock Consumer (팬아웃)
 
@@ -464,12 +556,60 @@ stock.restocked 수신
 | **중복 알림 스팸** | 상태 전이(`OUT_OF_STOCK→IN_STOCK`)에서만 발행 + `notification_log` UNIQUE 멱등키 |
 | **at-least-once 중복 처리** | 모든 컨슈머를 멱등하게. 특히 발송은 UNIQUE 제약으로 물리적 차단 |
 | **오탐(가짜 재입고)** | fail-closed. 판정 불가는 무조건 `UNKNOWN` |
-| **네이버 차단 / 부하** | 지터, 상품당 최소 체크 간격 하한(예: 60초), 전역 동시 요청 수 제한, 정상 User-Agent, `robots.txt` 존중. **남의 서버를 쓰는 일이므로 공격적 폴링은 하지 않는다** |
+| **네이버 차단 / 부하** | §7.1 참고. 지터, 상품당 최소 체크 간격 하한(예: 60초), 전역 동시 요청 수 제한, 쿠키 워밍업, `BLOCKED` 시 백오프. **남의 서버를 쓰는 일이므로 공격적 폴링은 하지 않는다** |
 | **체크 요청 적체** | `next_check_at` 선점 방식으로 중복 요청 원천 차단 + 컨슈머 랙 모니터링 |
 | **페이지 구조 변경** | `consecutive_failures` 임계 초과 시 `SUSPENDED` + 운영자 알림. 셀렉터는 한 곳에 모음 |
 | **브라우저 메모리 누수** | `BrowserContext` 반드시 close. 컨테이너 메모리 리밋 + OOM 재시작 |
 | ~~**URL 정규화**~~ | **해결됨 → `core/product/SmartStoreUrl`.** §7.2 참고 |
 | **긴 처리시간 vs 리밸런스** | Playwright 타임아웃 < `max.poll.interval.ms`. `max.poll.records=1` 권장 |
+
+---
+
+### 7.1 네이버 접근 — 실측 `[미해결]`
+
+시간순으로 기록한다. **중간 결론이 두 번 틀렸으므로** 그 과정도 남긴다.
+
+| 시도 | 쿠키/워밍업 | 결과 |
+|------|------------|------|
+| `curl` (브라우저 헤더 전부 채움) | 없음 | **429** `시스템오류` 페이지 |
+| 헤드리스 Chrome, 새 프로필 | 없음 | **429** |
+| 일반 Chrome, 평소 프로필 | 있음 | **성공** — 상태 객체 획득 |
+| Playwright + `smartstore.naver.com` 워밍업 | 있음 | **200** — 그런데 `NAVER 로그인` 페이지 |
+| Playwright + **스토어 홈** 워밍업 | 있음 | **490** — `새로고침`/`확인` 버튼 |
+
+**확정된 것**
+
+1. **HTTP 클라이언트로는 불가능하다.** `curl` 은 헤더를 아무리 채워도 TLS 지문에서 걸린다.
+   개발 IP와 가정용 IP의 응답이 바이트 단위로 같았으므로 IP 평판이 아니다.
+   "Playwright 대신 가벼운 HTTP GET" 이라는 선택지는 없다.
+
+2. **워밍업 URL을 루트로 잡으면 안 된다.** `https://smartstore.naver.com` 은
+   판매자 센터(`sell.smartstore.naver.com`)로 리다이렉트되며 로그인을 요구한다.
+   거기서 받은 쿠키를 물려주면 **상품 페이지 요청이 전부 로그인 페이지로 끌려간다.**
+
+   증상이 고약하다 — `HTTP 200` 이고 예외도 없다. 차단처럼 보이지 않는다.
+   `title` 을 찍고 나서야 `NAVER 로그인` 이라는 게 드러났다.
+   → 워밍업은 **그 상품이 속한 스토어 홈**(`/{storeId}`)에서 한다.
+
+3. **`490` 같은 비표준 코드를 쓴다.** 그래서 판정기는 아는 코드를 열거하지 않고
+   **2xx 가 아니면 전부 `BLOCKED`** 으로 본다. 모르는 코드가 `UNKNOWN` 으로 새면
+   `consecutive_failures` 가 올라가 **상대 쪽 사정으로 감시 목록 전체가 `SUSPENDED`** 가 된다.
+
+**아직 모르는 것**
+
+- `490` 이 봇 감지인지 단순 속도 제한인지. 25분 동안 20회 넘게 요청한 뒤에 나온 코드라
+  구분이 안 된다. **간격을 충분히 두고 1회만 시도해야 답이 나온다.**
+- 봇 감지로 판명되면 브라우저 지문을 더 손대는 방향으로 가지 않는다.
+  사이트가 자동 접근을 막으려고 세운 장치를 무력화하는 일이고,
+  이 문서 §7의 "남의 서버를 쓰는 일이므로 공격적 폴링은 하지 않는다"와도 어긋난다.
+  체크 간격을 크게 늘리거나(30~60분), 스토어 소유자라면 네이버 커머스 API 라는 정식 경로를 쓴다.
+
+**교훈 (설계에 반영됨)**
+
+원인을 세 번 헛짚었다 — "차단이다", "SSR이 조건부다", "렌더 타이밍이다".
+전부 틀렸고 실제로는 로그인 리다이렉트였다. 스냅샷에 `title` 과 최종 URL을 안 담고 있어서
+추측만 반복했다. **`PageSnapshot` 이 `title`/`url`/버튼을 갖는 이유가 이것이다.**
+판정에 안 쓰더라도 무엇을 받았는지는 항상 알 수 있어야 한다.
 
 ---
 

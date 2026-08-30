@@ -17,6 +17,19 @@ tasks.named<org.springframework.boot.gradle.tasks.bundling.BootJar>("bootJar") {
     archiveFileName.set("app.jar")
 }
 
+// 실제 스마트스토어에 접속하는 테스트는 기본 실행에서 제외한다.
+// 네이버는 데이터센터 IP 와 쿠키 없는 클라이언트를 차단하므로 CI 에서 돌면 반드시 깨진다.
+// 개발 PC 에서만: ./gradlew :backend:app-checker:test -Pexternal
+tasks.named<Test>("test") {
+    if (!project.hasProperty("external")) {
+        useJUnitPlatform { excludeTags("external") }
+    } else {
+        useJUnitPlatform()
+        // 헤드리스가 차단되면 -Pexternal -Pheaded 로 실브라우저를 띄워 원인을 가른다.
+        systemProperty("checker.headless", (!project.hasProperty("headed")).toString())
+    }
+}
+
 // CI 에서 브라우저 캐시를 채우는 용도. 로컬에서도 브라우저가 없을 때 쓴다.
 //
 // Playwright 는 첫 사용 시 브라우저를 자동으로 내려받지만, 그러면 테스트 실행 중에
