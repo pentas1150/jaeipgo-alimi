@@ -468,8 +468,78 @@ stock.restocked 수신
 | **체크 요청 적체** | `next_check_at` 선점 방식으로 중복 요청 원천 차단 + 컨슈머 랙 모니터링 |
 | **페이지 구조 변경** | `consecutive_failures` 임계 초과 시 `SUSPENDED` + 운영자 알림. 셀렉터는 한 곳에 모음 |
 | **브라우저 메모리 누수** | `BrowserContext` 반드시 close. 컨테이너 메모리 리밋 + OOM 재시작 |
-| **URL 정규화** | 쿼리스트링(`?NaPm=...` 등) 제거 후 `storeId`/`productNo`만 UNIQUE 키로. 같은 상품이 여러 row로 들어가는 걸 방지 |
+| ~~**URL 정규화**~~ | **해결됨 → `core/product/SmartStoreUrl`.** §7.2 참고 |
 | **긴 처리시간 vs 리밸런스** | Playwright 타임아웃 < `max.poll.interval.ms`. `max.poll.records=1` 권장 |
+
+---
+
+### 7.2 URL 파싱/검증 — `SmartStoreUrl`
+
+#### "이중 검증" 은 같은 규칙을 두 번 쓰는 게 아니다
+
+| | 목적 | 신뢰도 |
+|---|---|---|
+| 프론트 | **UX** — 왕복 없이 즉시 피드백 | **0** (curl 한 줄이면 우회) |
+| 백엔드 | **신뢰 경계** | 전부 |
+
+그래서 **정규식이 같을 필요가 없고, 같게 유지하려 애쓰면 손해다.** 프론트를 백엔드만큼
+엄격하게 만들면 나중에 백엔드가 지원 범위를 넓혔을 때 프론트가 막아서 버그가 된다.
+프론트는 호스트만 훑고(`looksLikeSmartStoreUrl`) 나머지는 서버에 맡긴다.
+
+#### 정규화 규칙
+
+```
+입력  https://m.smartstore.naver.com/ufodripper/products/13112687319?NaPm=..&n_media=27758
+출력  https://smartstore.naver.com/ufodripper/products/13112687319
+```
+
+1. `trim` → `java.net.URI` 파싱 (실패 시 거부)
+2. 스킴은 `http`/`https` 만. 없으면 `https` 를 붙여준다 (주소창에서 복사하면 보통 붙어 있지만,
+   없다고 거부하면 사용자는 이유를 모른 채 막힌다)
+3. `userInfo` 가 있으면 거부 — 정상적인 붙여넣기에서는 나올 수 없는 모양이다
+4. host 소문자화. `m.smartstore.naver.com` → `smartstore.naver.com`
+5. path 를 `^/([A-Za-z0-9_-]{2,128})/products/(\d{1,19})/?$` 로 매칭 (실패 시 거부).
+   **경로만 보므로 쿼리스트링·프래그먼트는 여기서 통째로 사라진다**
+6. 상품번호를 숫자로 한 번 돌려 표준형으로 만든다 — `/products/007` 과 `/products/7` 이
+   서로 다른 행이 되면 같은 상품에 알림이 두 번 나간다
+7. 재조립해 `product.product_url` 에 저장
+
+#### 지원 범위
+
+| | 처리 | 왜 |
+|---|---|---|
+| `smartstore.naver.com` | ✅ | |
+| `m.smartstore.naver.com` | ✅ 데스크톱으로 정규화 | 핸드폰에서 복사하는 가장 흔한 경로 |
+| `brand.naver.com` | ❌ 안내 후 거부 | 같은 상품번호 체계지만 페이지 구조가 검증되지 않았다. 구조가 다르면 판정이 전부 UNKNOWN 으로 떨어져 **조용히 동작하지 않는다** — 거부보다 나쁘다 |
+| `naver.me` | ❌ 안내 후 거부 | 리다이렉트를 따라가려면 app-api 가 외부 HTTP 요청을 해야 하고, §7.1 대로 네이버가 비브라우저 클라이언트를 차단한다 |
+| `shopping.naver.com` | ❌ 안내 후 거부 | 가격비교 페이지지 상품 페이지가 아니다 |
+
+#### 파서가 `core` 에 있는 이유
+
+등록 검증(`app-api`)과 페이지 판정 교차확인(`app-checker`) 양쪽이 상품번호를 쓰지만
+**계약이 다르다**:
+
+- 등록 파서 — "이 문자열이 지원하는 URL 인가?" **신뢰 경계.** 엄격해야 한다
+- 체커 추출 — "이미 검증돼 저장된 URL 에서 번호를 뽑는다" 내부 데이터. 느슨해도 안전
+
+`feat/stock-verdict` 브랜치의 `SmartStoreFields.productNoFrom()` 은 `/products/(\d+)` 라
+`https://evil.com/products/123` 도 통과시킨다. 체커 입장에선 문제없지만 신뢰 경계에는 못 쓴다.
+
+그래서 **엄격한 쪽만 `core` 에 두고, 체커는 URL 을 다시 파싱하지 않는다** —
+`StockCheckRequested` 이벤트에 실려 온 `externalProductNo` 를 쓴다.
+파싱은 등록 시점 한 곳에서만 일어나고, 체커는 신뢰할 수 있는 출처(DB)에서 번호를 받는다.
+그 브랜치를 통합할 때 `productNoFrom()` 은 삭제한다.
+
+경계: **URL 구조 = 도메인 지식**(`core`), **페이지 DOM/JSON 구조 = checker 전용**(`SmartStoreFields`).
+
+#### 검증은 빈 검증(`@SmartStoreUrl`)으로
+
+서비스에서 예외를 던지는 대신 애노테이션으로 두면 400 응답이 다른 필드 검증과 **같은 형태**
+(`MethodArgumentNotValidException` → ProblemDetail + `errors`)로 나간다.
+프론트가 응답을 두 가지로 나눠 다룰 필요가 없다.
+
+⚠️ 이 애노테이션은 **형식만** 본다. 상품이 실제로 존재하는지는 체크 왕복이 필요하고,
+4단계의 `PENDING` 게이트가 맡는다.
 
 ---
 

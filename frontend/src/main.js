@@ -18,6 +18,24 @@ function csrfToken() {
   return hit ? decodeURIComponent(hit.slice('XSRF-TOKEN='.length)) : ''
 }
 
+/**
+ * 서버가 준 RFC 7807 ProblemDetail 에서 사람이 읽을 문장을 뽑는다.
+ *
+ * GlobalExceptionHandler 가 검증 실패를 `errors: { 필드: 메시지 }` 로 담아주므로
+ * "서버 응답 400" 대신 어느 입력이 왜 틀렸는지 그대로 보여줄 수 있다.
+ */
+async function problemMessage(res) {
+  try {
+    const problem = await res.json()
+    const fieldErrors = problem.errors && Object.values(problem.errors)
+    if (fieldErrors && fieldErrors.length) return fieldErrors.join(' / ')
+    if (problem.detail) return problem.detail
+  } catch {
+    // 본문이 JSON 이 아니면 상태 코드로 만족한다.
+  }
+  return `서버 응답 ${res.status}`
+}
+
 /** 로그인 상태를 확인한다. 미인증은 401 이므로 예외가 아니라 정상 분기다. */
 async function loadMe() {
   const res = await fetch('/api/auth/me')
@@ -59,10 +77,33 @@ function renderSignedOut() {
 
 let currentUser = null
 
+/**
+ * 상품 URL 을 대충 훑는다.
+ *
+ * ⚠️ 일부러 백엔드보다 **느슨하다.** 프론트 검증의 목적은 보안이 아니라 UX 다 —
+ * 서버 왕복 없이 오타를 바로 알려주는 것뿐이고, curl 한 줄이면 우회된다.
+ * 진짜 방어선은 백엔드의 @SmartStoreUrl 이다.
+ *
+ * 여기를 백엔드만큼 엄격하게 만들면 나중에 백엔드가 지원 범위를 넓혔을 때
+ * 프론트가 막아서 버그가 된다. 그래서 호스트만 보고 나머지는 서버에 맡긴다.
+ */
+function looksLikeSmartStoreUrl(value) {
+  return /(^|\/\/)(m\.)?smartstore\.naver\.com\//i.test(value)
+}
+
 // 백엔드 도메인 API 가 아직 없으므로 지금은 배선 확인용 샘플 엔드포인트를 호출한다.
-// 3단계에서 POST /api/watches { productUrl } 로 바꾼다.
+// 6단계에서 POST /api/watches { productUrl } 로 바꾼다.
 form.addEventListener('submit', async (e) => {
   e.preventDefault()
+
+  const productUrl = form.url.value.trim()
+  if (!looksLikeSmartStoreUrl(productUrl)) {
+    result.textContent =
+      '네이버 스마트스토어 상품 URL 을 입력해주세요 (https://smartstore.naver.com/{스토어}/products/{번호})'
+    result.className = 'result err'
+    return
+  }
+
   result.textContent = '신청 중...'
   result.className = 'result'
 
@@ -78,7 +119,7 @@ form.addEventListener('submit', async (e) => {
         recipient: currentUser.email,
         channel: 'EMAIL',
         title: '재입고 알림 신청',
-        content: form.url.value.trim(),
+        content: productUrl,
       }),
     })
 
@@ -86,7 +127,7 @@ form.addEventListener('submit', async (e) => {
       renderSignedOut()
       throw new Error('로그인이 만료되었습니다. 다시 로그인해주세요.')
     }
-    if (!res.ok) throw new Error(`서버 응답 ${res.status}`)
+    if (!res.ok) throw new Error(await problemMessage(res))
 
     const body = await res.json()
     result.textContent = `신청 완료 (#${body.id}). 재입고되면 알려드립니다.`
