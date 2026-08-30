@@ -400,6 +400,29 @@ jobs:
             *)               echo "  ③ /api/ 프록시 OK (HTTP $code — 앱이 응답)" ;;
           esac
 
+          # ④ 도메인 + TLS 진입. 구글 OAuth 가 https 리다이렉트 URI 를 요구하므로
+          #    이 경로가 살아 있어야 로그인이 된다.
+          #
+          #    --resolve 로 DNS 를 우회한다. 러너가 집 안(파이)에서 도는데, 공유기가
+          #    NAT 헤어핀을 지원하지 않으면 내부에서 공인 IP 로 못 붙어 멀쩡한 배포가
+          #    실패로 보인다. Ingress IP 를 직접 물려 TLS/SNI/host 규칙만 검증한다.
+          #
+          #    인증서 부트스트랩(cert-renew CronJob 최초 1회) 전에는 Traefik 이 자체서명
+          #    기본 인증서를 내주므로 검증이 실패한다. 그건 배포 실패가 아니라 아직
+          #    설정 안 된 상태이므로 경고로만 남기고 넘어간다.
+          host="$(kubectl -n alimi get ingress alimi-domain -o jsonpath='{.spec.rules[0].host}' 2>/dev/null || true)"
+          if [ -z "$host" ]; then
+            echo "  ④ 도메인 Ingress 없음 — 건너뜀"
+          elif ! kubectl -n alimi get secret alimi-tls >/dev/null 2>&1; then
+            echo "::warning::alimi-tls Secret 이 없다. 인증서 부트스트랩 전이므로 https 검증을 건너뛴다 (k8s/pi/README.md §6.1)"
+          elif curl -fsS --max-time 10 --resolve "${host}:443:${ing}" "https://${host}/healthz" | grep -q ok; then
+            echo "  ④ https://${host} TLS 진입 OK"
+          else
+            echo "::error::https://${host} 진입 실패 — 인증서 또는 Ingress host 설정을 확인하라"
+            kubectl -n alimi get secret alimi-tls -o jsonpath='{.metadata.creationTimestamp}' || true
+            exit 1
+          fi
+
           echo "스모크 통과"
 
       # 롤아웃이나 스모크가 실패하면 직전 ReplicaSet 으로 되돌린다.

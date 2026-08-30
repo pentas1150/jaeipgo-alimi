@@ -1,0 +1,194 @@
+# Let's Encrypt 인증서 발급/갱신. cert-manager 를 쓰지 않는 이유는 자원이다 —
+# cert-manager 는 controller/webhook/cainjector 3파드(~150Mi)를 상시 띄우는데,
+# §12.10 대로 파이4 4GB 는 노드 자원이 이미 상한이다. 60일에 몇 분 도는 CronJob 이
+# 상시 메모리 0 으로 같은 일을 한다.
+#
+# ── 챌린지를 DNS-01 로 하는 이유 ─────────────────────────────────
+# HTTP-01 은 Let's Encrypt 가 우리 서버의 80번으로 들어와야 하는데, 국내 통신사는
+# 가정 회선의 80을 막는 경우가 많다. DNS-01 은 TXT 레코드만 세우면 되므로
+# **공유기에서 80을 열 필요가 없다.** 443만 포워딩하면 된다.
+#
+# ── DuckDNS 를 쓰는 이유 ────────────────────────────────────────
+# Let's Encrypt 의 발급 한도(등록 도메인당 주 50장)는 Public Suffix List 로 등록 도메인을
+# 판정한다. `iptime.org` 는 PSL 에 없어서 전국 ipTIME 사용자가 주 50장을 공유하게 되고
+# `too many certificates already issued` 로 막힌다. `duckdns.org` 는 PSL 에 등재되어
+# 서브도메인마다 한도가 독립이다.
+
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cert-renew
+  namespace: alimi
+
+---
+# Secret 하나만 만들 수 있으면 된다. Role 은 그 이상 주지 않는다.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: cert-renew
+  namespace: alimi
+rules:
+  # 기존 Secret 을 읽고 갱신하는 권한은 alimi-tls 하나로 못 박는다.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["alimi-tls"]
+    verbs: ["get", "update", "patch"]
+  # create 는 resourceNames 로 좁힐 수 없다 — 인가 시점에는 아직 이름이 없기 때문이다.
+  # 최초 1회 생성을 위해 어쩔 수 없이 네임스페이스 범위로 연다.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: cert-renew
+  namespace: alimi
+subjects:
+  - kind: ServiceAccount
+    name: cert-renew
+    namespace: alimi
+roleRef:
+  kind: Role
+  name: cert-renew
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# certbot 의 계정 키와 인증서 이력을 담는다. 이게 없으면 매 실행이 신규 발급이 되어
+# 중복 인증서 한도(주 5장)를 갉아먹고, `--keep-until-expiring` 도 판단 근거를 잃는다.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: letsencrypt
+  namespace: alimi
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 64Mi
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cert-renew-hooks
+  namespace: alimi
+data:
+  # certbot 이 챌린지 값을 CERTBOT_VALIDATION 환경변수로 넘겨준다.
+  # DuckDNS 는 `_acme-challenge.<sub>.duckdns.org` TXT 조회에 이 값을 응답한다.
+  duckdns-auth.sh: |
+    #!/bin/sh
+    set -eu
+    curl -fsS "https://www.duckdns.org/update?domains=${DUCKDNS_SUBDOMAIN}&token=${DUCKDNS_TOKEN}&txt=${CERTBOT_VALIDATION}" \
+      | grep -qx OK
+    # 전파 대기. Let's Encrypt 가 조회하러 오기 전에 TXT 가 보여야 한다.
+    # 짧게 잡으면 "NXDOMAIN looking up TXT" 로 실패하는데, 원인이 안 보여서 디버깅이 길어진다.
+    sleep 45
+
+  duckdns-cleanup.sh: |
+    #!/bin/sh
+    set -eu
+    # 실패해도 발급 자체는 이미 끝났으므로 Job 을 깨뜨리지 않는다.
+    curl -fsS "https://www.duckdns.org/update?domains=${DUCKDNS_SUBDOMAIN}&token=${DUCKDNS_TOKEN}&txt=removed&clear=true" \
+      >/dev/null || true
+
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: cert-renew
+  namespace: alimi
+spec:
+  # 일요일 19:00 UTC = 월요일 04:00 KST. (CronJob 의 timeZone 필드는 k8s 버전을 타므로 쓰지 않는다)
+  #
+  # 60일마다 한 번이 아니라 **매주** 도는 이유: certbot 은 만료 30일 전이 아니면
+  # `--keep-until-expiring` 으로 아무것도 하지 않고 끝난다. 즉 매주 돌려도 실제 발급은
+  # 90일에 한 번뿐이고, 대신 갱신이 실패했을 때 만료까지 네 번 이상 재시도할 기회가 생긴다.
+  # 단발성 스케줄은 그 한 번이 실패하면 그대로 만료된다.
+  schedule: "0 19 * * 0"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  startingDeadlineSeconds: 3600
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        spec:
+          serviceAccountName: cert-renew
+          restartPolicy: OnFailure
+
+          # 발급은 initContainer 가, Secret 반영은 본 컨테이너가 한다.
+          # 한 이미지에 certbot 과 kubectl 을 같이 넣으려면 직접 이미지를 구워야 하는데,
+          # 그 유지보수 비용이 컨테이너 하나 더 두는 것보다 크다.
+          initContainers:
+            - name: certbot
+              # linux/arm64 매니페스트 확인함 (docker manifest inspect)
+              image: certbot/certbot:v5.7.0
+              command: ["/bin/sh", "-c"]
+              args:
+                - |
+                  set -eu
+                  certbot certonly \
+                    --manual \
+                    --preferred-challenges dns \
+                    --manual-auth-hook /hooks/duckdns-auth.sh \
+                    --manual-cleanup-hook /hooks/duckdns-cleanup.sh \
+                    --non-interactive --agree-tos --no-eff-email \
+                    --email "${ACME_EMAIL}" \
+                    -d "${DUCKDNS_SUBDOMAIN}.duckdns.org" \
+                    --keep-until-expiring
+              # envFrom 으로 Secret 을 통째로 붓지 않는다 — MYSQL_ROOT_PASSWORD 같은
+              # 무관한 값이 certbot 프로세스 환경에 들어갈 이유가 없다.
+              env:
+                - name: DUCKDNS_SUBDOMAIN
+                  valueFrom: { secretKeyRef: { name: alimi-secret, key: DUCKDNS_SUBDOMAIN } }
+                - name: DUCKDNS_TOKEN
+                  valueFrom: { secretKeyRef: { name: alimi-secret, key: DUCKDNS_TOKEN } }
+                - name: ACME_EMAIL
+                  valueFrom: { secretKeyRef: { name: alimi-secret, key: ACME_EMAIL } }
+              volumeMounts:
+                - { name: letsencrypt, mountPath: /etc/letsencrypt }
+                - { name: work,        mountPath: /var/lib/letsencrypt }
+                - { name: hooks,       mountPath: /hooks }
+              resources:
+                requests: { memory: 64Mi, cpu: 50m }
+                limits:   { memory: 192Mi }
+
+          containers:
+            - name: publish
+              # linux/arm64 매니페스트 확인함
+              image: rancher/kubectl:v1.31.4
+              command: ["/bin/sh", "-c"]
+              args:
+                - |
+                  set -eu
+                  D="${DUCKDNS_SUBDOMAIN}.duckdns.org"
+                  # 내용이 그대로면 apply 는 무변경으로 끝난다. 매주 돌아도 파드가 재시작되지 않는다.
+                  kubectl create secret tls alimi-tls \
+                    --namespace alimi \
+                    --cert="/etc/letsencrypt/live/${D}/fullchain.pem" \
+                    --key="/etc/letsencrypt/live/${D}/privkey.pem" \
+                    --dry-run=client -o yaml \
+                    | kubectl apply -f -
+                  echo "alimi-tls 반영 완료: ${D}"
+              env:
+                - name: DUCKDNS_SUBDOMAIN
+                  valueFrom: { secretKeyRef: { name: alimi-secret, key: DUCKDNS_SUBDOMAIN } }
+              volumeMounts:
+                - { name: letsencrypt, mountPath: /etc/letsencrypt, readOnly: true }
+              resources:
+                requests: { memory: 32Mi, cpu: 50m }
+                limits:   { memory: 96Mi }
+
+          volumes:
+            - name: letsencrypt
+              persistentVolumeClaim:
+                claimName: letsencrypt
+            - name: work
+              emptyDir: {}
+            - name: hooks
+              configMap:
+                name: cert-renew-hooks
+                defaultMode: 0755

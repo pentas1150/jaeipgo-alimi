@@ -257,6 +257,120 @@ kubectl -n alimi exec deploy/alimi-frontend -- wget -qO- http://alimi-api:8080/a
 
 ---
 
+## 6.1 도메인 + TLS (구글 OAuth 전제 조건)
+
+구글 OAuth 는 승인된 리다이렉트 URI 에 **https** 를 요구한다. 예외는 `localhost` / `127.0.0.1`
+뿐이고 **사설 IP(`192.168.*`)와 `.local` 은 콘솔에 등록조차 되지 않는다.** 그래서 로그인을
+붙이려면 공인 도메인과 신뢰받는 인증서가 먼저 있어야 한다.
+
+### 왜 공유기 DDNS(`*.iptime.org`)가 아니라 DuckDNS 인가
+
+Let's Encrypt 의 발급 한도(**등록 도메인당 주 50장**)는 Public Suffix List 로 등록 도메인을
+판정한다. 확인해 보면:
+
+```bash
+curl -s https://publicsuffix.org/list/public_suffix_list.dat | grep -x 'iptime.org\|duckdns.org'
+# duckdns.org   ← 등재
+# (iptime.org 는 나오지 않는다)
+```
+
+`iptime.org` 는 PSL 에 없으므로 **전국 ipTIME DDNS 사용자가 주 50장을 공유**하게 되어
+`too many certificates already issued for: iptime.org` 로 막힌다. 구글의 승인된 도메인
+소유권 검증도 같은 이유로 `iptime.org` 단위가 되어 증명이 불가능할 수 있다.
+`duckdns.org` 는 PSL 에 등재돼 서브도메인마다 한도가 독립이다.
+
+> **인증서는 살 필요가 없다.** Let's Encrypt 는 무료이고 모든 브라우저가 신뢰한다.
+> 돈이 드는 건 도메인이지 인증서가 아니다. 자체서명은 OAuth 리다이렉트 **중간에**
+> 브라우저 경고를 끼워넣어서 데모가 끊긴다.
+
+### 포트는 443만 연다
+
+DNS-01 챌린지는 TXT 레코드만 세우면 되므로 **Let's Encrypt 가 우리 서버로 들어올 필요가 없다.**
+국내 통신사는 가정 회선의 80번을 막는 경우가 많은데, 그 문제를 통째로 우회한다.
+
+구글 OAuth 도 마찬가지다 — **구글 서버는 우리 서버에 접속하지 않는다.** 리다이렉트는 사용자
+브라우저가 하고, 토큰 교환은 파이가 바깥으로 나가는 요청이다.
+
+### 절차
+
+**① DuckDNS 서브도메인 확보**
+
+<https://www.duckdns.org> 에서 로그인 → 서브도메인 생성 → 토큰 확인.
+`current ip` 에 집 공인 IP 를 넣는다.
+
+**② IP 자동 갱신** — 공유기 DDNS 목록에 DuckDNS 가 있으면 그걸 쓰고, 없으면 파이에서:
+
+```bash
+# crontab -e
+*/5 * * * * curl -fsS "https://www.duckdns.org/update?domains=<sub>&token=<token>&ip=" >/dev/null
+```
+
+**③ 공유기 포트포워딩** — 외부 443 → 파이 443. **80은 열지 않는다.**
+
+**④ 매니페스트에 도메인 반영** — `k8s/overlays/pi/ingress.yaml` 의 `host` **두 곳**
+(`spec.tls[0].hosts[0]` 와 `spec.rules[0].host`)을 본인 도메인으로 바꾼다.
+
+**⑤ Secret 채우기** — `k8s/base/secret.env` 에 세 줄을 추가한다
+(`secret.env.example` 참고). CD 는 GitHub Secret `ALIMI_SECRET_ENV` 를 풀어 쓰므로
+**거기에도 같이 넣어야 한다.**
+
+```
+DUCKDNS_SUBDOMAIN=<sub>      # .duckdns.org 를 뺀 앞부분만
+DUCKDNS_TOKEN=<token>
+ACME_EMAIL=you@example.com
+```
+
+**⑥ 인증서 최초 발급** — CronJob 은 매주 월요일 04:00 KST 에 돌지만, 처음 한 번은
+기다리지 말고 직접 돌린다:
+
+```bash
+kubectl -n alimi create job --from=cronjob/cert-renew cert-renew-bootstrap
+kubectl -n alimi wait --for=condition=complete job/cert-renew-bootstrap --timeout=600s
+kubectl -n alimi logs job/cert-renew-bootstrap --all-containers
+
+kubectl -n alimi get secret alimi-tls    # 이게 생기면 성공
+```
+
+Traefik 은 Secret 이 생기는 순간 알아서 바꿔 문다. 재시작이 필요 없다.
+
+**⑦ 확인**
+
+```bash
+ing="$(kubectl -n alimi get ingress alimi -o jsonpath='{.status.loadBalancer.ingress[0].ip}')"
+host="$(kubectl -n alimi get ingress alimi-domain -o jsonpath='{.spec.rules[0].host}')"
+
+# --resolve 로 DNS 를 우회한다 — 공유기가 NAT 헤어핀을 지원하지 않으면
+# 집 안에서 공인 IP 로 못 붙어서 멀쩡한 설정이 실패로 보인다.
+curl -fsS --resolve "${host}:443:${ing}" "https://${host}/healthz"
+
+# http 는 302 로 https 에 올라가야 한다
+curl -sI --resolve "${host}:80:${ing}" "http://${host}/" | head -2
+```
+
+**⑧ 구글 클라우드 콘솔** — OAuth 2.0 클라이언트의 승인된 리다이렉트 URI 에 등록한다:
+
+```
+https://<sub>.duckdns.org/api/login/oauth2/code/google
+```
+
+`/api/` 가 붙는 이유는 nginx 가 `/api/` 만 백엔드로 프록시하기 때문이다. Spring Security 의
+기본 경로(`/login/oauth2/code/google`)를 그대로 쓰면 nginx 가 `index.html` 을 돌려줘
+로그인이 시작조차 안 된다. 자세한 건 1단계 구현 노트를 참고.
+
+### 갱신이 매주인 이유
+
+certbot 은 `--keep-until-expiring` 이라 만료 30일 전이 아니면 아무것도 하지 않고 끝난다.
+즉 매주 돌려도 실제 발급은 90일에 한 번이고, 대신 **갱신이 실패했을 때 만료까지 네 번 이상
+재시도할 기회**가 생긴다. 60일 단발 스케줄은 그 한 번이 실패하면 그대로 만료된다.
+
+### 자원
+
+cert-manager(controller/webhook/cainjector 3파드, ~150Mi 상시)를 쓰지 않았다.
+§12.10 대로 노드 자원이 이미 상한이고, CronJob 은 **상시 메모리 0** 으로 같은 일을 한다.
+파드는 주 1회 몇 분만 뜨는데, 스케줄을 04:00 로 잡아 롤링 배포와 겹치지 않게 했다.
+
+---
+
 ## 7. 무중단 확인
 
 배포를 한 번 더 트리거하고, 파이에서 동시에:
