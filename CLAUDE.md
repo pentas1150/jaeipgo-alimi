@@ -86,6 +86,7 @@ CD 는 GitHub Secret `ALIMI_SECRET_ENV` 를 배포 시점에만 이 파일로 �
 - `notification_log` 멱등성 (V2 마이그레이션)
 - **회원 + 구글 OAuth 로그인** (V3) — `core/user/`, `app-api/auth/`. 세션은 Redis (§8.1)
 - **`Product` 엔티티 + 상태 전이** (V4) — `core/product/`. 재고/감시 2축 분리 (§4.1)
+- **상품 URL 파싱/검증** — `core/product/SmartStoreUrl` + `@SmartStoreUrl` 제약 (§7.2)
 
 아직 없는 것:
 - `Topics.kt` 의 실제 토픽들은 **생성만 되고 프로듀서/컨슈머가 없다**
@@ -93,6 +94,18 @@ CD 는 GitHub Secret `ALIMI_SECRET_ENV` 를 배포 시점에만 이 파일로 �
 - `notification.dispatch.v1` 은 **컨슈머만 있고 프로듀서가 없다** (팬아웃 미구현)
 - 이메일은 기본이 `log` 어댑터다. 실제 발송하려면 `alimi.notification.email.transport=smtp`
 - Spring Batch (`spring-boot-starter-batch`) 미추가 — 메타데이터 테이블 마이그레이션과 함께 도입
+
+## 상품 URL
+
+**파싱은 `core/product/SmartStoreUrl` 한 곳에서만 한다.** 체커는 URL 을 다시 파싱하지 않고
+`StockCheckRequested.externalProductNo` 를 쓴다. `/products/(\d+)` 같은 느슨한 정규식은
+`https://evil.com/products/123` 도 통과시키므로 **신뢰 경계에 쓰지 않는다.**
+
+**프론트 검증은 일부러 백엔드보다 느슨하다.** 목적이 보안이 아니라 UX 이기 때문이다.
+프론트를 백엔드만큼 엄격하게 만들면 지원 범위를 넓힐 때 프론트가 막아서 버그가 된다.
+
+지원: `smartstore.naver.com`, `m.smartstore.naver.com`(데스크톱으로 정규화).
+`brand.naver.com` / `naver.me` / `shopping.naver.com` 은 이유를 안내하고 거부한다.
 
 ## 인증
 
